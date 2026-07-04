@@ -42,7 +42,13 @@ dependencies = [
     "numpy>=1.24",
     "openpyxl>=3.1,<4",
     "python-dotenv>=1.0,<2",
+    # Sandbox de chemins partagée (non publiée sur PyPI — résolue via
+    # [tool.uv.sources] ; en CI/pip, préinstaller depuis le tag Git).
+    "bim-sandbox>=0.1.0,<0.2",
 ]
+
+[tool.uv.sources]
+bim-sandbox = { git = "https://github.com/Slimouzi/bim-sandbox.git", tag = "bim-sandbox-v0.1.0" }
 
 [project.optional-dependencies]
 dev = [

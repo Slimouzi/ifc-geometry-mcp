@@ -26,10 +26,15 @@ modifier sans mettre à jour les deux côtés.
 git clone https://github.com/Slimouzi/ifc-geometry-mcp.git
 cd ifc-geometry-mcp
 python -m venv .venv && source .venv/bin/activate
+# bim-sandbox (sandbox de chemins partagée) n'est PAS publié sur PyPI : on
+# l'installe d'abord depuis son tag Git, sinon la résolution de la dépendance
+# ``bim-sandbox>=0.1.0,<0.2`` échoue.
+pip install "git+https://github.com/Slimouzi/bim-sandbox.git@bim-sandbox-v0.1.0"
 pip install -e .
 ```
 
-Dépendances clés : `ifcopenshell>=0.8`, `shapely>=2.0`, `numpy`, `fastmcp>=3.0`.
+Dépendances clés : `ifcopenshell>=0.8`, `shapely>=2.0`, `numpy`, `fastmcp>=3.0`
+(sur PyPI) et `bim-sandbox` (tag Git — préinstallation ci-dessus).
 
 ## Configuration MCP (Claude Desktop / Cowork)
 
