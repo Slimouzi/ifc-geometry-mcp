@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ifc-geometry-mcp"
+version = "0.1.0"
+description = "Serveur MCP ifc-geometry d'audit géométrique IFC (moteur IfcOpenShell) — clash espaces, inventaire pièces/zones, pertes de surface, limites d'espaces et correspondance d'ouvertures. Produit les JSON consommés par audit-bim-i3f (import_preliminary_findings)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+    { name = "Stanislas Limouzi", email = "stanislas@bimdata.io" },
+]
+keywords = [
+    "bim",
+    "ifc",
+    "ifcopenshell",
+    "mcp",
+    "model-context-protocol",
+    "clash",
+    "audit",
+    "bimdata",
+    "i3f",
+    "geometry",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Other Audience",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Natural Language :: French",
+]
+dependencies = [
+    "fastmcp>=3.0,<4",
+    "ifcopenshell>=0.8,<0.9",
+    "shapely>=2.0,<3",
+    "numpy>=1.24",
+    "openpyxl>=3.1,<4",
+    "python-dotenv>=1.0,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.5",
+    "build>=1.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/Slimouzi/ifc-geometry-mcp"
+Repository = "https://github.com/Slimouzi/ifc-geometry-mcp"
+
+[project.scripts]
+ifc-geometry-mcp = "ifc_openshell_mcp.__main__:main"
+ifc-openshell-mcp = "ifc_openshell_mcp.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["ifc_openshell_mcp*"]
+exclude = ["tests*"]
+
+[tool.ruff.lint.per-file-ignores]
+# Le smoke test fixe AUDIT_OUTPUT_DIR dans l'environnement AVANT d'importer les
+# analyzers (qui lisent la sandbox à l'import) — E402 est donc intentionnel.
+"tests/*" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
