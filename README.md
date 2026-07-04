@@ -38,7 +38,7 @@ d'`audit-bim-i3f`** pour que les JSON atterrissent là où l'import les lit :
 
 ```json
 "ifc-geometry": {
-  "command": "/Users/stani/code/MCP/ifc-openshell/.venv/bin/ifc-geometry-mcp",
+  "command": "/Users/stani/code/MCP/ifc-geometry-mcp/.venv/bin/ifc-geometry-mcp",
   "args": ["--transport", "stdio"],
   "env": {
     "AUDIT_OUTPUT_DIR": "/Users/stani/code/MCP/audit_out",
