@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -25,6 +26,7 @@ from .analyzers import (
     space_clash,
     surface_loss,
 )
+from .enrichers import base_quantities
 from .safe_paths import safe_input_path, safe_output_path
 
 load_dotenv()
@@ -252,4 +254,130 @@ def extract_envelope_surfaces(
         "shab_m2": payload["shab_m2"],
         "ratio_fac_shab": payload["ratio_fac_shab"],
         "counts": payload["counts"],
+    }
+
+
+# --------------------------------------------------------------------------- #
+#  7. Complétion des BaseQuantities manquantes (écrit une COPIE, jamais in-place)
+# --------------------------------------------------------------------------- #
+_DEFAULT_BQ_SUFFIX = ".with_base_quantities.ifc"
+
+
+@mcp.tool()
+def complete_ifc_base_quantities(
+    ifc_path: str,
+    output_ifc_path: str | None = None,
+    classes: list[str] | None = None,
+    overwrite_existing: bool = False,
+    dry_run: bool = True,
+    confirm: bool = False,
+    precision: int = 3,
+) -> dict[str, Any]:
+    """Complète les ``Qto_*BaseQuantities`` manquantes dans une **copie** de l'IFC.
+
+    Calcule via IFC OpenShell les quantités déjà exploitées, de façon fiable, par
+    le MCP audit-bim-i3f, et les ajoute/met à jour dans un **nouveau** fichier IFC
+    sous ``AUDIT_OUTPUT_DIR``. **Le fichier source n'est jamais modifié.**
+
+    Quantités : ``IfcSpace``/``NetFloorArea``, ``IfcSlab``/``NetArea``,
+    ``IfcWall``/``NetSideArea``, ``IfcWindow``/``IfcDoor``/``Width``+``Height``.
+    Les ``Gross*`` et l'aire des menuiseries ne sont **pas** inventées (marquées
+    *skipped*, cf. ``warnings``). Une géométrie illisible → quantité *skipped*.
+
+    Sécurité :
+
+    - ``dry_run=True`` (défaut) : **aucun** fichier écrit, on renvoie le plan.
+    - ``dry_run=False`` exige ``confirm=True`` (sinon ``status="failed"``).
+    - Sortie sandboxée sous ``AUDIT_OUTPUT_DIR`` ; jamais d'écrasement de la source.
+
+    Args:
+        ifc_path: IFC source (sandbox ``AUDIT_INPUT_DIR``, lecture seule).
+        output_ifc_path: nom du fichier de sortie (sandbox ``AUDIT_OUTPUT_DIR``,
+            aplati au basename). Défaut : ``<source>.with_base_quantities.ifc``.
+        classes: sous-ensemble de classes à traiter (défaut : toutes les
+            supportées — ``IfcSpace``/``IfcSlab``/``IfcWall``/``IfcWindow``/``IfcDoor``).
+        overwrite_existing: si ``True``, écrase une BaseQuantity déjà présente ;
+            sinon elle est conservée (*skipped* ``exists_not_overwritten``).
+        dry_run: si ``True`` (défaut), n'écrit rien.
+        confirm: obligatoire (``True``) pour écrire quand ``dry_run=False``.
+        precision: nombre de décimales des valeurs écrites (défaut 3).
+
+    Returns:
+        ``{status, source_ifc, output_ifc, summary, changes, warnings}`` — ``status``
+        ∈ {``dry_run``, ``written``, ``failed``} ; ``changes`` audite chaque valeur.
+    """
+    model, safe = _load(ifc_path)
+
+    # Nom de sortie : fourni (aplati au basename, extension IFC exigée) ou défaut.
+    out_name = (
+        output_ifc_path.strip() if output_ifc_path and output_ifc_path.strip() else None
+    )
+    if out_name is None:
+        out_name = f"{safe.stem}{_DEFAULT_BQ_SUFFIX}"
+    base_out = Path(out_name).name
+    if Path(base_out).suffix.lower() not in _IFC_EXT:
+        return {
+            "status": "failed",
+            "source_ifc": str(safe),
+            "output_ifc": None,
+            "summary": {},
+            "changes": [],
+            "warnings": [],
+            "error": f"output_ifc_path doit avoir une extension IFC {sorted(_IFC_EXT)} : {base_out!r}",
+        }
+
+    plan = base_quantities.plan_completion(
+        model,
+        classes=classes,
+        overwrite_existing=overwrite_existing,
+        precision=precision,
+    )
+
+    # ── Mode simulation : rien n'est écrit ──────────────────────────────── #
+    if dry_run:
+        intended = safe_output_path(base_out, overwrite=True)  # résolution seule
+        return {
+            "status": "dry_run",
+            "source_ifc": str(safe),
+            "output_ifc": str(intended),  # cible envisagée, NON écrite
+            "summary": plan["summary"],
+            "changes": plan["changes"],
+            "warnings": plan["warnings"],
+        }
+
+    # ── Écriture réelle : garde-fous ────────────────────────────────────── #
+    if not confirm:
+        return {
+            "status": "failed",
+            "source_ifc": str(safe),
+            "output_ifc": None,
+            "summary": plan["summary"],
+            "changes": plan["changes"],
+            "warnings": plan["warnings"],
+            "error": "Écriture demandée (dry_run=False) sans confirm=True — refusée.",
+        }
+
+    target = safe_output_path(
+        base_out, overwrite=False
+    )  # refuse d'écraser une sortie existante
+    if target.resolve() == safe.resolve():  # jamais la source (garde explicite)
+        return {
+            "status": "failed",
+            "source_ifc": str(safe),
+            "output_ifc": None,
+            "summary": plan["summary"],
+            "changes": plan["changes"],
+            "warnings": plan["warnings"],
+            "error": "Le chemin de sortie coïncide avec la source — écriture refusée.",
+        }
+
+    base_quantities.apply_completion(model, plan["changes"])
+    model.write(str(target))
+    return {
+        "status": "written",
+        "source_ifc": str(safe),
+        "output_ifc": str(target),
+        "summary": plan["summary"],
+        "changes": plan["changes"],
+        "warnings": plan["warnings"],
     }
