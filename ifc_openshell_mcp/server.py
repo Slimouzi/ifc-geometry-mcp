@@ -36,6 +36,9 @@ logger = logging.getLogger("ifc_openshell_mcp")
 mcp = FastMCP("ifc-geometry")
 
 _IFC_EXT = {".ifc", ".ifczip", ".ifcxml"}
+# Extensions acceptées en **écriture** : ``ifcopenshell.file.write`` ne sait PAS
+# produire du ``.ifcxml`` (NotImplementedError). Distinct de ``_IFC_EXT`` (lecture).
+_OUTPUT_IFC_EXT = {".ifc", ".ifczip"}
 
 
 def _load(ifc_path: str):
@@ -308,23 +311,14 @@ def complete_ifc_base_quantities(
     """
     model, safe = _load(ifc_path)
 
-    # Nom de sortie : fourni (aplati au basename, extension IFC exigée) ou défaut.
+    # Nom de sortie : fourni (aplati au basename) ou défaut. Extension exigée pour
+    # l'**écriture** (``_OUTPUT_IFC_EXT`` : .ifcxml refusé — non écrit par ifcopenshell).
     out_name = (
         output_ifc_path.strip() if output_ifc_path and output_ifc_path.strip() else None
     )
     if out_name is None:
         out_name = f"{safe.stem}{_DEFAULT_BQ_SUFFIX}"
     base_out = Path(out_name).name
-    if Path(base_out).suffix.lower() not in _IFC_EXT:
-        return {
-            "status": "failed",
-            "source_ifc": str(safe),
-            "output_ifc": None,
-            "summary": {},
-            "changes": [],
-            "warnings": [],
-            "error": f"output_ifc_path doit avoir une extension IFC {sorted(_IFC_EXT)} : {base_out!r}",
-        }
 
     plan = base_quantities.plan_completion(
         model,
@@ -333,13 +327,46 @@ def complete_ifc_base_quantities(
         precision=precision,
     )
 
+    def _failed(error: str) -> dict[str, Any]:
+        return {
+            "status": "failed",
+            "source_ifc": str(safe),
+            "output_ifc": None,
+            "summary": plan["summary"],
+            "changes": plan["changes"],
+            "warnings": plan["warnings"],
+            "error": error,
+        }
+
+    # P2 — extension de sortie supportée par l'écriture IFC (jamais .ifcxml).
+    if Path(base_out).suffix.lower() not in _OUTPUT_IFC_EXT:
+        return _failed(
+            f"Extension de sortie non supportée par l'écriture IFC "
+            f"{sorted(_OUTPUT_IFC_EXT)} : {base_out!r}"
+        )
+
+    # P1 — résolution défensive du chemin de sortie : ``safe_output_path`` peut
+    # lever (FileExistsError / UnsafePathError⊂ValueError). On résout avec
+    # ``overwrite=True`` (résolution seule, sans lever sur existence) et on
+    # retourne un payload structuré en cas d'erreur, jamais d'exception brute.
+    try:
+        target = safe_output_path(base_out, overwrite=True)
+    except (FileExistsError, ValueError) as exc:
+        return _failed(str(exc))
+
+    # P1 — collision avec la source, atteinte de façon **fiable** même quand
+    # ``AUDIT_INPUT_DIR == AUDIT_OUTPUT_DIR`` (avant toute écriture).
+    if target.resolve() == safe.resolve():
+        return _failed(
+            "Le chemin de sortie coïncide avec la source — écriture refusée."
+        )
+
     # ── Mode simulation : rien n'est écrit ──────────────────────────────── #
     if dry_run:
-        intended = safe_output_path(base_out, overwrite=True)  # résolution seule
         return {
             "status": "dry_run",
             "source_ifc": str(safe),
-            "output_ifc": str(intended),  # cible envisagée, NON écrite
+            "output_ifc": str(target),  # cible envisagée, NON écrite
             "summary": plan["summary"],
             "changes": plan["changes"],
             "warnings": plan["warnings"],
@@ -347,29 +374,13 @@ def complete_ifc_base_quantities(
 
     # ── Écriture réelle : garde-fous ────────────────────────────────────── #
     if not confirm:
-        return {
-            "status": "failed",
-            "source_ifc": str(safe),
-            "output_ifc": None,
-            "summary": plan["summary"],
-            "changes": plan["changes"],
-            "warnings": plan["warnings"],
-            "error": "Écriture demandée (dry_run=False) sans confirm=True — refusée.",
-        }
-
-    target = safe_output_path(
-        base_out, overwrite=False
-    )  # refuse d'écraser une sortie existante
-    if target.resolve() == safe.resolve():  # jamais la source (garde explicite)
-        return {
-            "status": "failed",
-            "source_ifc": str(safe),
-            "output_ifc": None,
-            "summary": plan["summary"],
-            "changes": plan["changes"],
-            "warnings": plan["warnings"],
-            "error": "Le chemin de sortie coïncide avec la source — écriture refusée.",
-        }
+        return _failed("Écriture demandée (dry_run=False) sans confirm=True — refusée.")
+    if (
+        target.exists()
+    ):  # ne jamais écraser une sortie existante (≠ source, déjà exclue)
+        return _failed(
+            f"Le fichier de sortie existe déjà : {target.name} — ne pas écraser."
+        )
 
     base_quantities.apply_completion(model, plan["changes"])
     model.write(str(target))

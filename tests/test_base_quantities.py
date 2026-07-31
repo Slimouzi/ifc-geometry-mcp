@@ -250,3 +250,33 @@ def test_classes_filter_scopes_work(env):
     )
     touched = {c["ifc_class"] for c in res["changes"]}
     assert touched == {"IfcSlab"}
+
+
+def test_output_collision_with_source_returns_failed(tmp_path, monkeypatch):
+    # P1 : input == output (même dossier) + sortie == source → status failed,
+    # SANS exception (safe_output_path pourrait lever FileExistsError).
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    monkeypatch.setenv("AUDIT_INPUT_DIR", str(shared))
+    monkeypatch.setenv("AUDIT_OUTPUT_DIR", str(shared))
+    _build_source(str(shared / "maquette.ifc"))
+    before = (shared / "maquette.ifc").read_bytes()
+
+    res = server.complete_ifc_base_quantities(
+        "maquette.ifc", output_ifc_path="maquette.ifc", dry_run=False, confirm=True
+    )
+    assert res["status"] == "failed"
+    assert "source" in res["error"].lower()
+    # Source jamais touchée.
+    assert (shared / "maquette.ifc").read_bytes() == before
+
+
+def test_ifcxml_output_rejected(env):
+    # P2 : .ifcxml n'est pas écrit par ifcopenshell → refus propre (pas d'exception).
+    src, _in_dir, out_dir = env
+    res = server.complete_ifc_base_quantities(
+        "maquette.ifc", output_ifc_path="copy.ifcxml", dry_run=False, confirm=True
+    )
+    assert res["status"] == "failed"
+    assert "ifcxml" in res["error"].lower() or "extension" in res["error"].lower()
+    assert list(out_dir.glob("*.ifcxml")) == []
