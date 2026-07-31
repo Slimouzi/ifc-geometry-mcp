@@ -392,3 +392,51 @@ def complete_ifc_base_quantities(
         "changes": plan["changes"],
         "warnings": plan["warnings"],
     }
+
+
+# --------------------------------------------------------------------------- #
+#  8. Export JSON des quantités calculées (flux « fusion », JAMAIS d'écriture IFC)
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+def export_computed_base_quantities(
+    ifc_path: str,
+    classes: list[str] | None = None,
+    precision: int = 3,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Exporte les ``BaseQuantities`` calculées géométriquement en **JSON**
+    (keyé ``GlobalId``), **sans jamais écrire dans l'IFC**.
+
+    Contrat de fusion pour audit-bim-i3f : chaque quantité porte ``global_id``,
+    ``ifc_class``, ``qto``, ``quantity``, ``value``, ``unit``, ``method``,
+    ``status`` (``computed`` | ``skipped``), ``source`` (``computed_ifcopenshell``).
+    La **fusion gap-only** (ne combler que les vides) est faite en aval par
+    audit-bim contre le snapshot BIMData (jointure ``uuid == global_id``).
+
+    Écrit ``<stem>_computed_quantities.json`` sous ``AUDIT_OUTPUT_DIR`` (schéma
+    ``computed_base_quantities/v1``).
+
+    Scope par défaut = minimal DIEPPE (``IfcSpace``/``IfcSlab``/``IfcWindow``/
+    ``IfcDoor`` → NetFloorArea, NetArea, Width/Height). Les murs d'enveloppe
+    (NetSideArea), volumes et Gross* restent en **phase 2**.
+
+    Args:
+        ifc_path: Chemin de la maquette IFC (sandbox ``AUDIT_INPUT_DIR``).
+        classes: sous-ensemble de classes ; ``None`` → scope minimal DIEPPE.
+        precision: décimales des valeurs calculées (défaut 3).
+        overwrite: écrase le JSON existant.
+
+    Returns:
+        ``{json_path, coverage, n_quantities}``.
+    """
+    model, safe = _load(ifc_path)
+    payload = base_quantities.export_computed_quantities(
+        model, classes=classes, precision=precision
+    )
+    payload = {"source_ifc": str(safe), **payload}
+    json_path = _write(safe.stem, "_computed_quantities.json", payload, overwrite)
+    return {
+        "json_path": json_path,
+        "coverage": payload["coverage"],
+        "n_quantities": len(payload["quantities"]),
+    }
