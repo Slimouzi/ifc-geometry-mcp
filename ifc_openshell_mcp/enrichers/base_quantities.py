@@ -254,3 +254,101 @@ def apply_completion(model, changes: list[dict[str, Any]]) -> None:
         if qto is None:
             qto = ifcopenshell.api.pset.add_qto(model, product=element, name=qto_name)
         ifcopenshell.api.pset.edit_qto(model, qto=qto, properties=props)
+
+
+# --------------------------------------------------------------------------- #
+#  Export des quantités calculées (JSON keyé GlobalId) — flux « fusion »
+# --------------------------------------------------------------------------- #
+#
+# Contrat consommé par audit-bim-i3f pour une **fusion gap-only** dans le
+# snapshot BIMData (clé de jointure ``BimObject.uuid == global_id``). Ce flux
+# **n'écrit rien dans l'IFC** : il ne fait qu'exporter les valeurs calculées.
+
+SOURCE_COMPUTED = "computed_ifcopenshell"
+EXPORT_SCHEMA = "computed_base_quantities/v1"
+
+# Scope minimal DIEPPE (cf. cahier des charges) : espaces, dalles, menuiseries.
+# Les murs d'enveloppe (NetSideArea) restent en **phase 2** — non exportés par
+# défaut car la sélection « enveloppe » demande une heuristique dédiée.
+DIEPPE_EXPORT_CLASSES: tuple[str, ...] = ("IfcSpace", "IfcSlab", "IfcWindow", "IfcDoor")
+
+# Unité par quantité (modèles I3F en SI mètre → aires m², longueurs m).
+_QTY_UNIT: dict[str, str] = {
+    "NetFloorArea": "m2",
+    "NetArea": "m2",
+    "NetSideArea": "m2",
+    "Width": "m",
+    "Height": "m",
+}
+
+
+def export_computed_quantities(
+    model,
+    *,
+    classes: list[str] | None = None,
+    precision: int = 3,
+) -> dict[str, Any]:
+    """Calcule les BaseQuantities géométriques et les renvoie **exportables** (JSON),
+    **sans écrire dans l'IFC**.
+
+    Chaque quantité porte : ``global_id``, ``ifc_class``, ``qto``, ``quantity``,
+    ``value``, ``unit``, ``method``, ``status`` (``computed`` | ``skipped``),
+    ``source`` (+ ``reason`` si *skipped*). Le *gap-only* (ne combler que les
+    vides) est appliqué **en aval** par le consommateur (audit-bim), contre le
+    snapshot BIMData faisant foi — ici on calcule pour **tous** les éléments.
+
+    ``classes`` défaut = scope minimal DIEPPE (``DIEPPE_EXPORT_CLASSES``) : les
+    murs d'enveloppe restent en phase 2.
+    """
+    warnings: list[str] = []
+    if classes is None:
+        selected: list[str] = list(DIEPPE_EXPORT_CLASSES)
+    else:
+        selected = _select_classes(classes, warnings)
+
+    quantities: list[dict[str, Any]] = []
+    scanned: set[str] = set()
+    n_computed = n_failed = 0
+
+    for ifc_class in selected:
+        qto_name = _QTO_NAME[ifc_class]
+        for element in model.by_type(ifc_class):
+            gid = element.GlobalId
+            scanned.add(gid)
+            try:
+                results = _compute_quantities(element, ifc_class, precision)
+            except Exception as exc:  # noqa: BLE001 — un élément ne fait pas échouer l'export
+                logger.warning("géométrie KO %s %s : %s", ifc_class, gid, exc)
+                warnings.append(f"géométrie illisible : {ifc_class} {gid}")
+                n_failed += 1
+                continue
+            for qty_name, (value, method, skip_reason) in results.items():
+                computed = value is not None
+                entry: dict[str, Any] = {
+                    "global_id": gid,
+                    "ifc_class": ifc_class,
+                    "qto": qto_name,
+                    "quantity": qty_name,
+                    "value": value,
+                    "unit": _QTY_UNIT.get(qty_name),
+                    "method": method,
+                    "status": "computed" if computed else "skipped",
+                    "source": SOURCE_COMPUTED,
+                }
+                if not computed:
+                    entry["reason"] = skip_reason or "not_computable"
+                    n_failed += 1
+                else:
+                    n_computed += 1
+                quantities.append(entry)
+
+    return {
+        "schema": EXPORT_SCHEMA,
+        "quantities": quantities,
+        "coverage": {
+            "n_elements": len(scanned),
+            "n_computed": n_computed,
+            "n_failed": n_failed,
+        },
+        "warnings": warnings,
+    }
