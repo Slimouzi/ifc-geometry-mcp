@@ -55,22 +55,91 @@ def _external_wall_guids(model) -> tuple[set[str], str]:
     return guids, method
 
 
-def _facades(model) -> tuple[float, int, int, str]:
-    """Aire de façade nette = somme des NetSideArea des murs extérieurs (m²)."""
-    guids, method = _external_wall_guids(model)
-    total = 0.0
+def _wall_type(el) -> str:
+    """Type métier d'un mur (ObjectType > PredefinedType > classe IFC)."""
+    ot = getattr(el, "ObjectType", None)
+    if isinstance(ot, str) and ot.strip():
+        return ot.strip()
+    pt = getattr(el, "PredefinedType", None)
+    if isinstance(pt, str) and pt.strip() and pt != "NOTDEFINED":
+        return pt.strip()
+    return el.is_a()
+
+
+def _wall_side_area(el) -> float | None:
+    """NetSideArea (Qto) sinon aire de parement géométrique."""
+    a = ifc_utils.quantity(el, "NetSideArea", "GrossSideArea", "GrossArea")
+    if a is None:
+        a = ifc_utils.vertical_face_area(el)
+    return a
+
+
+def _finalize_by_type(buckets: dict) -> list[dict]:
+    return sorted(
+        (
+            {
+                "type": b["type"],
+                "etages": " / ".join(sorted(b["etages"])),
+                "netsidearea_m2": round(b["netsidearea_m2"], 2),
+                "nombre": b["nombre"],
+            }
+            for b in buckets.values()
+        ),
+        key=lambda x: x["type"],
+    )
+
+
+def _facades(model) -> dict:
+    """Décomposition des murs par type.
+
+    - ``par_type`` : murs **extérieurs** (façades), agrégés par type — c'est le
+      total métier de l'annexe MOA (colonne D « Archicad BQ NetSideArea »).
+    - ``hors_filtre_type`` : murs **non retenus** par le filtre extérieur — exclus
+      du total métier, exposés à titre diagnostic (jamais dans le total façade).
+    - ``superficie_calque_total_m2`` : NetSideArea de **tous** les murs (retenus +
+      hors filtre) — le total « brut » avant filtrage.
+    """
+    ext_guids, method = _external_wall_guids(model)
+    par: dict[str, dict] = {}
+    hors: dict[str, dict] = {}
+    facade_net = calque_total = 0.0
     n_ext = n_geom_fallback = 0
-    for guid in guids:
-        el = model.by_guid(guid)
-        a = ifc_utils.quantity(el, "NetSideArea", "GrossSideArea", "GrossArea")
-        if a is None:
-            a = ifc_utils.vertical_face_area(el)
-            if a:
+
+    for t in (*_WALL_TYPES, *_CURTAIN_TYPES):
+        for el in model.by_type(t):
+            a = _wall_side_area(el)
+            if not a:
+                continue
+            if (
+                ifc_utils.quantity(el, "NetSideArea", "GrossSideArea", "GrossArea")
+                is None
+            ):
                 n_geom_fallback += 1
-        if a:
-            total += a
-            n_ext += 1
-    return total, n_ext, n_geom_fallback, method
+            calque_total += a
+            is_ext = el.GlobalId in ext_guids
+            bucket = par if is_ext else hors
+            wt = _wall_type(el)
+            b = bucket.setdefault(
+                wt, {"type": wt, "etages": set(), "netsidearea_m2": 0.0, "nombre": 0}
+            )
+            b["netsidearea_m2"] += a
+            b["nombre"] += 1
+            st = ifc_utils.storey_name(el)
+            if st:
+                b["etages"].add(str(st))
+            if is_ext:
+                facade_net += a
+                n_ext += 1
+
+    return {
+        "par_type": _finalize_by_type(par),
+        "hors_filtre_type": _finalize_by_type(hors),
+        "facade_net": round(facade_net, 2),
+        "calque_total": round(calque_total, 2),
+        "method": method,
+        "n_ext": n_ext,
+        "n_geom_fallback": n_geom_fallback,
+    }
 
 
 def _menuiserie_area(el) -> tuple[float, float, float] | None:
@@ -88,16 +157,17 @@ def _menuiserie_area(el) -> tuple[float, float, float] | None:
     return None
 
 
-def _menuiseries(model) -> tuple[float, int, list[dict]]:
-    """Aire des baies : fenêtres + portes extérieures."""
-    total = 0.0
+def _menuiseries(model) -> dict:
+    """Aire des baies : fenêtres + portes extérieures, **splitée** par catégorie
+    (colonnes MOA G « Surface des Fenêtres » / H « Surface des Portes »)."""
+    surf_fenetres = surf_portes = 0.0
     n = 0
     detail: list[dict] = []
     for el in model.by_type("IfcWindow"):
         res = _menuiserie_area(el)
         if res:
             w, h, area = res
-            total += area
+            surf_fenetres += area
             n += 1
             detail.append(
                 {
@@ -113,7 +183,7 @@ def _menuiseries(model) -> tuple[float, int, list[dict]]:
             res = _menuiserie_area(el)
             if res:
                 w, h, area = res
-                total += area
+                surf_portes += area
                 n += 1
                 detail.append(
                     {
@@ -124,7 +194,13 @@ def _menuiseries(model) -> tuple[float, int, list[dict]]:
                         "surface_m2": round(area, 2),
                     }
                 )
-    return total, n, detail
+    return {
+        "total": surf_fenetres + surf_portes,
+        "fenetres": surf_fenetres,
+        "portes": surf_portes,
+        "n": n,
+        "detail": detail,
+    }
 
 
 def _shab(model) -> tuple[float, int]:
@@ -143,28 +219,40 @@ def _shab(model) -> tuple[float, int]:
 
 
 def run(model, file_name: str, *, seuil_3f: float | None = None) -> dict:
-    facade_net, n_ext, n_geom, method = _facades(model)
-    menuis, n_menuis, menuis_detail = _menuiseries(model)
-    facade_gross = facade_net + menuis
+    fac = _facades(model)
+    men = _menuiseries(model)
+    facade_net = fac["facade_net"]
+    facade_gross = round(facade_net + men["total"], 2)
     shab, n_shab = _shab(model)
     ratio = (facade_gross / shab) if shab else None
 
     return {
         "file": file_name,
-        "superficie_facades_m2": round(facade_gross, 2),
-        "superficie_facades_nette_m2": round(facade_net, 2),
-        "superficie_menuiseries_m2": round(menuis, 2),
+        # Total métier = murs extérieurs (par_type), menuiseries incluses.
+        "superficie_facades_m2": facade_gross,
+        "superficie_facades_nette_m2": facade_net,
+        # Total « brut » avant filtrage (tous murs) — jamais le total métier.
+        "superficie_calque_total_m2": fac["calque_total"],
+        "superficie_menuiseries_m2": round(men["total"], 2),
+        "superficie_menuiseries_fenetres_m2": round(men["fenetres"], 2),
+        "superficie_menuiseries_portes_m2": round(men["portes"], 2),
         "shab_m2": round(shab, 2),
         "ratio_fac_shab": round(ratio, 3) if ratio is not None else None,
         "seuil_3f": seuil_3f,
-        "methode_facade": method,
+        "seuil_i3f": seuil_3f,  # alias attendu par le consommateur audit-bim
+        "methode_facade": fac["method"],
+        # Décomposition métier (colonnes MOA) vs diagnostic (hors filtre).
+        "par_type": fac["par_type"],
+        "hors_filtre_type": fac["hors_filtre_type"],
         "counts": {
-            "n_murs_exterieurs": n_ext,
-            "n_facades_fallback_geom": n_geom,
-            "n_menuiseries": n_menuis,
+            "n_murs_exterieurs": fac["n_ext"],
+            "n_facades_fallback_geom": fac["n_geom_fallback"],
+            "n_types_facade": len(fac["par_type"]),
+            "n_types_hors_filtre": len(fac["hors_filtre_type"]),
+            "n_menuiseries": men["n"],
             "n_pieces_shab": n_shab,
         },
-        "menuiseries_detail": menuis_detail,
+        "menuiseries_detail": men["detail"],
     }
 
 
