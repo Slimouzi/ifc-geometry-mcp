@@ -232,6 +232,8 @@ def extract_envelope_surfaces(
     ifc_path: str,
     seuil_3f: float | None = None,
     overwrite: bool = False,
+    layer_pattern: str | None = None,
+    type_pattern: str | None = None,
 ) -> dict[str, Any]:
     """Calcule les surfaces d'enveloppe (façades, menuiseries, SHAB, ratio).
 
@@ -239,14 +241,35 @@ def extract_envelope_surfaces(
     format attendu par le pack I3F — à passer en ``enveloppe_xlsx`` à
     ``generate_avp_i3f_pack``).
 
+    Deux modes de sélection des murs d'enveloppe :
+
+    - **calque + type** dès que ``layer_pattern`` est fourni : sélection I3F,
+      reproduisant l'extraction de référence (le calque délimite l'enveloppe,
+      ``type_pattern`` sépare murs extérieurs et habillages) ;
+    - **géométrique** par défaut : murs marqués extérieurs (limites d'espace ou
+      ``IsExternal``), sans hypothèse de convention de calque.
+
     Args:
         ifc_path: Chemin de la maquette IFC.
         seuil_3f: Seuil réglementaire 3F du ratio FAC/SHAB (optionnel, politique
             externe — laissé vide si non fourni).
         overwrite: Écrase les fichiers existants.
+        layer_pattern: Expression régulière du **calque** des murs d'enveloppe,
+            ex. ``"221|extérieurs? périphériques"`` (convention ArchiCAD I3F).
+            Vide → sélection géométrique.
+        type_pattern: Expression régulière filtrant les **noms de type** au sein
+            du calque, ex. ``"^ME[ _]"``. Les types du calque hors filtre sont
+            listés dans ``hors_filtre_type``, hors total métier. Vide → tous les
+            murs du calque sont retenus.
     """
     model, safe = _load(ifc_path)
-    payload = envelope.run(model, file_name=safe.name, seuil_3f=seuil_3f)
+    payload = envelope.run(
+        model,
+        file_name=safe.name,
+        seuil_3f=seuil_3f,
+        layer_pattern=layer_pattern,
+        type_pattern=type_pattern,
+    )
     validate_emitted_envelope(payload)  # conformité V1 garantie AVANT écriture
     json_path = _write(safe.stem, "_envelope.json", payload, overwrite)
     xlsx_path = safe_output_path(f"{safe.stem}_enveloppe.xlsx", overwrite=overwrite)
