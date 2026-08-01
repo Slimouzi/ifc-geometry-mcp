@@ -18,6 +18,9 @@ valeur numérique en colonne B ; table détaillée ancrée sur « Composant »).
 
 from __future__ import annotations
 
+import re
+
+import ifcopenshell.util.element as ue
 from bim_core.contracts import SCHEMA_ENVELOPE_QUANTITIES_V1
 
 from .. import ifc_utils
@@ -28,6 +31,26 @@ _WALL_TYPES = ("IfcWall", "IfcWallStandardCase")
 _CURTAIN_TYPES = ("IfcCurtainWall",)
 # Pièces exclues de la surface habitable (annexes non chauffées / extérieur).
 _SHAB_EXCLUDE = {"cave", "cellier", "parking", "technique", "exterieur"}
+# Annexes non habitables exclues de la SHAB **I3F** (mode calque) — jeu de
+# l'extraction de référence Tarare 0546L : cellier, cave, balcon, garage,
+# escalier, local technique.
+#
+# Ces libellés métier ne sont PAS les valeurs rendues par
+# ``normalize_room_type`` : « balcon » y devient ``exterieur``, « local
+# technique » ``technique``, et « garage » / « escalier » n'ont aucun motif et
+# retombent sur ``autre``. Comparer les libellés métier au type normalisé
+# n'exclurait donc que ``cave`` et ``cellier``, et laisserait un garage zoné
+# gonfler la SHAB — donc fausser le ratio FAC/SHAB. D'où deux niveaux.
+_SHAB_EXCLUDE_I3F_TYPES = frozenset({"cave", "cellier", "exterieur", "technique"})
+# Repli sur le libellé brut, pour ce que la normalisation ne distingue pas.
+_SHAB_EXCLUDE_I3F_RAW = re.compile(r"garage|escalier", re.I)
+
+
+def _is_i3f_shab_excluded(label: str | None) -> bool:
+    """La pièce est-elle une annexe non habitable au sens I3F ?"""
+    if normalize_room_type(label) in _SHAB_EXCLUDE_I3F_TYPES:
+        return True
+    return bool(_SHAB_EXCLUDE_I3F_RAW.search(label or ""))
 
 
 _WALL_LIKE = {"IfcWall", "IfcWallStandardCase", "IfcCurtainWall"}
@@ -58,14 +81,53 @@ def _external_wall_guids(model) -> tuple[set[str], str]:
 
 
 def _wall_type(el) -> str:
-    """Type métier d'un mur (ObjectType > PredefinedType > classe IFC)."""
-    ot = getattr(el, "ObjectType", None)
-    if isinstance(ot, str) and ot.strip():
-        return ot.strip()
+    """Type **métier** d'un mur.
+
+    Ordre de résolution, du plus signifiant au moins signifiant :
+
+    1. le **type IFC** (``IfcWallType.Name``) — c'est là que vivent les noms de
+       composants ArchiCAD (« ME_R+1_Enduit_recoupement 530 x 2850 »).
+       ``ifcopenshell.util.element.get_type`` est utilisé plutôt que
+       ``IsTypedBy`` : cette relation n'existe qu'en IFC4, alors que les
+       maquettes ArchiCAD I3F sont en **IFC2X3** (``IsDefinedBy`` →
+       ``IfcRelDefinesByType``) ;
+    2. ``ObjectType``, puis ``Name`` de l'instance ;
+    3. ``PredefinedType`` en **dernier recours** seulement — sur ArchiCAD il
+       vaut ``ELEMENTEDWALL`` pour tous les murs et écrase donc toute
+       décomposition métier en un type unique.
+    """
+    t = ue.get_type(el)
+    tn = getattr(t, "Name", None) if t is not None else None
+    if isinstance(tn, str) and tn.strip():
+        return tn.strip()
+    for attr in ("ObjectType", "Name"):
+        v = getattr(el, attr, None)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
     pt = getattr(el, "PredefinedType", None)
     if isinstance(pt, str) and pt.strip() and pt != "NOTDEFINED":
         return pt.strip()
     return el.is_a()
+
+
+def _wall_layer(el) -> str | None:
+    """Calque ArchiCAD d'un mur.
+
+    Source primaire : pset ``ArchiCADProperties`` (``Calque`` ou ``Layer``).
+    Repli : ``IfcPresentationLayerAssignment`` porté par la représentation.
+    """
+    ac = (ue.get_psets(el) or {}).get("ArchiCADProperties") or {}
+    for key in ("Calque", "Layer"):
+        v = ac.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    rep = getattr(el, "Representation", None)
+    for r in getattr(rep, "Representations", None) or []:
+        for la in getattr(r, "LayerAssignments", None) or []:
+            name = getattr(la, "Name", None)
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+    return None
 
 
 def _wall_side_area(el) -> float | None:
@@ -150,6 +212,152 @@ def _facades(model) -> dict:
     }
 
 
+def _facades_by_layer(model, layer_re, type_re) -> dict:
+    """Décomposition I3F : murs sélectionnés par **calque**, puis filtrés par
+    **nom de type** métier.
+
+    Reproduit l'extraction de référence Tarare 0546L :
+
+    - le calque (ex. « 221 - MURS - Extérieurs périphériques ») délimite les
+      murs d'enveloppe — un filtre géométrique « extérieur » ne le remplace pas,
+      il retient aussi habillages et ouvrages annexes ;
+    - au sein du calque, ``type_pattern`` (ex. ``^ME[ _]``) distingue les murs
+      extérieurs des habillages (zinc, alu, bois, couvertines) : ces derniers
+      restent listés en ``hors_filtre_type``, **hors du total métier** ;
+    - le total façade est la somme des ``NetSideArea`` des types retenus —
+      **sans** les menuiseries, qui ont leur propre total.
+    """
+    par: dict[str, dict] = {}
+    hors: dict[str, dict] = {}
+    wall_types: dict[int, str] = {}
+    facade_net = calque_total = 0.0
+    n_retenus = n_calque = n_sans_calque = n_geom_fallback = 0
+
+    for t in (*_WALL_TYPES, *_CURTAIN_TYPES):
+        for el in model.by_type(t):
+            layer = _wall_layer(el)
+            if layer is None:
+                n_sans_calque += 1
+                continue
+            if not layer_re.search(layer):
+                continue
+            n_calque += 1
+            a = _wall_side_area(el)
+            if not a:
+                continue
+            if (
+                ifc_utils.quantity(el, "NetSideArea", "GrossSideArea", "GrossArea")
+                is None
+            ):
+                n_geom_fallback += 1
+            wt = _wall_type(el)
+            wall_types[el.id()] = wt
+            retenu = type_re is None or bool(type_re.search(wt))
+            b = (par if retenu else hors).setdefault(
+                wt, {"type": wt, "etages": set(), "netsidearea_m2": 0.0, "nombre": 0}
+            )
+            b["netsidearea_m2"] += a
+            b["nombre"] += 1
+            st = ifc_utils.storey_name(el)
+            if st:
+                b["etages"].add(str(st))
+            calque_total += a
+            if retenu:
+                facade_net += a
+                n_retenus += 1
+
+    return {
+        "par_type": _finalize_by_type(par),
+        "hors_filtre_type": _finalize_by_type(hors),
+        "facade_net": round(facade_net, 2),
+        "calque_total": round(calque_total, 2),
+        "method": "layer_type_filter",
+        "n_ext": n_retenus,
+        "n_geom_fallback": n_geom_fallback,
+        "n_murs_calque": n_calque,
+        "n_murs_sans_calque": n_sans_calque,
+        "wall_types": wall_types,
+    }
+
+
+def _menuiseries_of_walls(model, wall_types: dict[int, str]) -> dict:
+    """Menuiseries **portées par les murs sélectionnés** (percement → remplissage).
+
+    Contrairement au comptage global de toutes les baies extérieures, on ne
+    retient ici que les fenêtres/portes qui remplissent une ouverture d'un mur
+    du calque : c'est la définition de l'extraction I3F.
+    """
+    fills = {
+        rel.RelatingOpeningElement.id(): rel.RelatedBuildingElement
+        for rel in model.by_type("IfcRelFillsElement")
+    }
+    surf_fenetres = surf_portes = 0.0
+    n = 0
+    detail: list[dict] = []
+    par_type_openings: dict[str, float] = {}
+    for rel in model.by_type("IfcRelVoidsElement"):
+        host = rel.RelatingBuildingElement
+        if host is None or host.id() not in wall_types:
+            continue
+        fill = fills.get(rel.RelatedOpeningElement.id())
+        if fill is None or not (fill.is_a("IfcWindow") or fill.is_a("IfcDoor")):
+            continue
+        res = _menuiserie_area(fill)
+        if not res:
+            continue
+        w, h, area = res
+        if fill.is_a("IfcWindow"):
+            surf_fenetres += area
+        else:
+            surf_portes += area
+        n += 1
+        par_type_openings[wall_types[host.id()]] = (
+            par_type_openings.get(wall_types[host.id()], 0.0) + area
+        )
+        detail.append(
+            {
+                "type": fill.is_a(),
+                "name": fill.Name,
+                "largeur_m": round(w, 2) if w else None,
+                "hauteur_m": round(h, 2) if h else None,
+                "surface_m2": round(area, 2),
+            }
+        )
+    return {
+        "total": surf_fenetres + surf_portes,
+        "fenetres": surf_fenetres,
+        "portes": surf_portes,
+        "n": n,
+        "detail": detail,
+        "par_type": par_type_openings,
+    }
+
+
+def _shab_zoned(model) -> tuple[float, int, float]:
+    """SHAB I3F : pièces **rattachées à une zone**, hors annexes non habitables.
+
+    La double condition (zone + type de pièce) est ce qui distingue la SHAB de
+    la simple somme des surfaces de pièces : une pièce hors zone n'appartient
+    pas à un logement.
+    """
+    space_to_zones, _ = ifc_utils.zone_map(model)
+    total = excluded = 0.0
+    n = 0
+    for sp in model.by_type("IfcSpace"):
+        if not space_to_zones.get(sp.GlobalId):
+            continue
+        area = ifc_utils.quantity(sp, "NetFloorArea", "GrossFloorArea", "NetArea")
+        if not area:
+            continue
+        label = ifc_utils.space_long_name(sp) or sp.Name or ""
+        if _is_i3f_shab_excluded(label):
+            excluded += area
+            continue
+        total += area
+        n += 1
+    return total, n, excluded
+
+
 def _menuiserie_area(el) -> tuple[float, float, float] | None:
     """(largeur, hauteur, surface) d'une baie via attributs/Qto, sinon géométrie."""
     w = getattr(el, "OverallWidth", None)
@@ -226,15 +434,42 @@ def _shab(model) -> tuple[float, int]:
     return total, n
 
 
-def run(model, file_name: str, *, seuil_3f: float | None = None) -> dict:
+def run(
+    model,
+    file_name: str,
+    *,
+    seuil_3f: float | None = None,
+    layer_pattern: str | None = None,
+    type_pattern: str | None = None,
+) -> dict:
     """Produit le document ``envelope_quantities/v1`` (contrat bim-core).
 
+    Deux modes de sélection des murs d'enveloppe :
+
+    - **calque + type** (``layer_pattern`` fourni) — sélection I3F : le calque
+      délimite l'enveloppe, ``type_pattern`` sépare murs extérieurs et
+      habillages. Total façade = ``NetSideArea`` des types retenus, menuiseries
+      comptées **sur ces murs**, SHAB restreinte aux pièces zonées hors annexes.
+      C'est le mode qui reproduit l'extraction de référence.
+    - **géométrique** (défaut) — murs marqués extérieurs (limites d'espace ou
+      ``IsExternal``), total façade menuiseries incluses. Conservé tel quel :
+      il ne suppose aucune convention de calque.
+
+    Les motifs employés sont **explicites** (aucune valeur codée en dur pour un
+    projet donné) et repris dans ``diagnostics.filters``.
+
     Le document est **construit directement au format V1** : il n'est jamais
-    assemblé à plat puis migré. ``summary`` porte les totaux métier, ``par_type``
-    la décomposition qui alimente l'annexe MOA, ``hors_filtre_type`` les types
-    écartés du total, et ``diagnostics`` ce qui éclaire le calcul sans jamais
-    entrer dans un total (compteurs, détail des menuiseries, méthode).
+    assemblé à plat puis migré.
     """
+    if layer_pattern:
+        return _run_i3f(
+            model,
+            file_name,
+            seuil_3f=seuil_3f,
+            layer_pattern=layer_pattern,
+            type_pattern=type_pattern,
+        )
+
     fac = _facades(model)
     men = _menuiseries(model)
     facade_net = fac["facade_net"]
@@ -273,6 +508,74 @@ def run(model, file_name: str, *, seuil_3f: float | None = None) -> dict:
                 "n_menuiseries": men["n"],
                 "n_pieces_shab": n_shab,
             },
+            "menuiseries_detail": men["detail"],
+        },
+    }
+
+
+def _run_i3f(
+    model,
+    file_name: str,
+    *,
+    seuil_3f: float | None,
+    layer_pattern: str,
+    type_pattern: str | None,
+) -> dict:
+    """Mode calque + type (extraction I3F). Voir :func:`run`."""
+    layer_re = re.compile(layer_pattern, re.I)
+    type_re = re.compile(type_pattern, re.I) if type_pattern else None
+
+    fac = _facades_by_layer(model, layer_re, type_re)
+    men = _menuiseries_of_walls(model, fac["wall_types"])
+    shab, n_shab, shab_exclu = _shab_zoned(model)
+    facade_net = fac["facade_net"]
+    ratio = (facade_net / shab) if shab else None
+
+    # Ventilation des menuiseries par type de mur porteur (colonne MOA F).
+    openings = men["par_type"]
+    for row in fac["par_type"]:
+        row["menuiseries_m2"] = round(openings.get(row["type"], 0.0), 2)
+
+    return {
+        "schema": SCHEMA_ENVELOPE_QUANTITIES_V1,
+        "source": contract_source("extract_envelope_surfaces", file_name),
+        "created_at": utc_now_iso(),
+        "summary": {
+            # Total métier = NetSideArea des types RETENUS, menuiseries exclues
+            # (elles ont leur propre total) — définition de l'extraction I3F.
+            "superficie_facades_m2": facade_net,
+            "superficie_facades_nette_m2": facade_net,
+            # Total du calque, filtre de type inclus : retenus + hors filtre.
+            "superficie_calque_total_m2": fac["calque_total"],
+            "superficie_menuiseries_m2": round(men["total"], 2),
+            "superficie_menuiseries_fenetres_m2": round(men["fenetres"], 2),
+            "superficie_menuiseries_portes_m2": round(men["portes"], 2),
+            "shab_m2": round(shab, 2),
+            "ratio_fac_shab": round(ratio, 4) if ratio is not None else None,
+            "seuil_i3f": seuil_3f,
+            "conforme_seuil": (
+                bool(ratio <= seuil_3f) if (ratio is not None and seuil_3f) else None
+            ),
+            "methode_facade": fac["method"],
+        },
+        "par_type": fac["par_type"],
+        "hors_filtre_type": fac["hors_filtre_type"],
+        "diagnostics": {
+            # Motifs employés : la sélection est reproductible et auditable.
+            "filters": {"layer_pattern": layer_pattern, "type_pattern": type_pattern},
+            "counts": {
+                "n_murs_calque": fac["n_murs_calque"],
+                "n_murs_sans_calque": fac["n_murs_sans_calque"],
+                "n_murs_retenus": fac["n_ext"],
+                "n_facades_fallback_geom": fac["n_geom_fallback"],
+                "n_types_facade": len(fac["par_type"]),
+                "n_types_hors_filtre": len(fac["hors_filtre_type"]),
+                "n_menuiseries": men["n"],
+                "n_pieces_shab": n_shab,
+            },
+            "shab_types_exclus": sorted(_SHAB_EXCLUDE_I3F_TYPES)
+            + [_SHAB_EXCLUDE_I3F_RAW.pattern],
+            "shab_exclusions_m2": round(shab_exclu, 2),
             "menuiseries_detail": men["detail"],
         },
     }

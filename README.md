@@ -114,6 +114,44 @@ Les cinq JSON de findings préliminaires (`*_space_inventory.json`,
 `*_openings_check.json`) ne sont **pas encore** contractualisés : leur forme
 reste verrouillée par `tests/test_contract.py`.
 
+## Sélection de l'enveloppe : calque + type
+
+`extract_envelope_surfaces` propose deux modes de sélection des murs.
+
+| Mode | Déclenchement | Sélection | Total façade |
+|---|---|---|---|
+| **Calque + type** (I3F) | `layer_pattern` fourni | murs du calque, filtrés par `type_pattern` | `NetSideArea` des types retenus, menuiseries **exclues** |
+| **Géométrique** (défaut) | aucun paramètre | murs marqués extérieurs (limites d'espace ou `IsExternal`) | murs extérieurs, menuiseries **incluses** |
+
+Sur une maquette ArchiCAD, le mode géométrique ne reproduit pas la
+décomposition MOA : le calque est ce qui délimite réellement l'enveloppe, et il
+faut encore écarter les habillages (zinc, alu, bois, couvertines) qu'il
+contient. D'où les deux motifs, **explicites** — aucune valeur n'est codée en
+dur pour un projet :
+
+```python
+extract_envelope_surfaces(
+    "modele.ifc",
+    seuil_3f=0.9,
+    layer_pattern=r"221|ext[ée]rieurs?\s+p[ée]riph[ée]riques",
+    type_pattern=r"^ME[ _]",
+)
+```
+
+Les motifs employés sont repris dans `diagnostics.filters` du JSON produit : la
+sélection reste auditable et reproductible.
+
+**Nom de type métier.** Il vient du **type IFC** (`IfcWallType.Name`), résolu
+via `ifcopenshell.util.element.get_type` — et non de `IsTypedBy`, qui n'existe
+qu'en IFC4 alors que les maquettes ArchiCAD I3F sont en IFC2X3. `ObjectType` et
+`Name` servent de repli ; `PredefinedType` n'est qu'un dernier recours, car il
+vaut `ELEMENTEDWALL` pour tous les murs ArchiCAD et écraserait la décomposition
+métier en un type unique.
+
+**SHAB.** En mode calque, seules les pièces **rattachées à une zone** comptent,
+hors annexes non habitables (cellier, cave, balcon, garage, escalier, local) —
+les exclusions appliquées sont listées dans `diagnostics.shab_types_exclus`.
+
 ## Détails géométriques
 
 - Empreinte 2D d'un élément = union (`shapely.unary_union`) des facettes du
