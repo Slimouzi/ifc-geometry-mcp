@@ -42,8 +42,10 @@ from typing import Any
 import ifcopenshell
 import ifcopenshell.api.pset
 import ifcopenshell.util.element as ue
+from bim_core.contracts import SCHEMA_COMPUTED_BASE_QUANTITIES_V1, SOURCE_COMPUTED
 
 from .. import ifc_utils
+from ..contracts import contract_source, utc_now_iso
 
 logger = logging.getLogger("ifc_openshell_mcp.enrichers.base_quantities")
 
@@ -264,8 +266,9 @@ def apply_completion(model, changes: list[dict[str, Any]]) -> None:
 # snapshot BIMData (clé de jointure ``BimObject.uuid == global_id``). Ce flux
 # **n'écrit rien dans l'IFC** : il ne fait qu'exporter les valeurs calculées.
 
-SOURCE_COMPUTED = "computed_ifcopenshell"
-EXPORT_SCHEMA = "computed_base_quantities/v1"
+# Schéma et provenance viennent du contrat partagé (bim-core) — jamais
+# redéclarés localement, sous peine de divergence silencieuse.
+EXPORT_SCHEMA = SCHEMA_COMPUTED_BASE_QUANTITIES_V1
 
 # Scope minimal DIEPPE (cf. cahier des charges) : espaces, dalles, menuiseries.
 # Les murs d'enveloppe (NetSideArea) restent en **phase 2** — non exportés par
@@ -287,6 +290,7 @@ def export_computed_quantities(
     *,
     classes: list[str] | None = None,
     precision: int = 3,
+    ifc_file: str | None = None,
 ) -> dict[str, Any]:
     """Calcule les BaseQuantities géométriques et les renvoie **exportables** (JSON),
     **sans écrire dans l'IFC**.
@@ -344,6 +348,8 @@ def export_computed_quantities(
 
     return {
         "schema": EXPORT_SCHEMA,
+        "source": contract_source("export_computed_base_quantities", ifc_file or ""),
+        "created_at": utc_now_iso(),
         "quantities": quantities,
         "coverage": {
             "n_elements": len(scanned),

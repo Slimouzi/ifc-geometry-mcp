@@ -30,11 +30,13 @@ python -m venv .venv && source .venv/bin/activate
 # l'installe d'abord depuis son tag Git, sinon la résolution de la dépendance
 # ``bim-sandbox>=0.1.0,<0.2`` échoue.
 pip install "git+https://github.com/Slimouzi/bim-sandbox.git@bim-sandbox-v0.1.0"
+# bim-core (contrats JSON versionnés) — même raison, même mode d'installation.
+pip install "git+https://github.com/Slimouzi/bim-core.git@bim-core-v0.2.0"
 pip install -e .
 ```
 
 Dépendances clés : `ifcopenshell>=0.8`, `shapely>=2.0`, `numpy`, `fastmcp>=3.0`
-(sur PyPI) et `bim-sandbox` (tag Git — préinstallation ci-dessus).
+(sur PyPI), `bim-sandbox` et `bim-core` (tags Git — préinstallations ci-dessus).
 
 ## Configuration MCP (Claude Desktop / Cowork)
 
@@ -86,6 +88,31 @@ Les 5 outils sont **indépendants** et peuvent tourner en parallèle. Voir
 | seuil doublon | `0.90` | `run_space_clash_audit.duplicate_ratio` |
 | adjacence limites | `0.35` m | `check_space_boundaries.adjacency_tol_m` |
 | appariement ouvertures | `0.10` m | `check_opening_correspondence.tolerance_m` |
+
+## Contrats JSON émis
+
+Deux sorties sont des **contrats versionnés** définis dans
+[`bim-core`](https://github.com/Slimouzi/bim-core) (`bim_core.contracts`) :
+
+| Outil | Fichier | Schéma |
+|---|---|---|
+| `extract_envelope_surfaces` | `<stem>_envelope.json` | `envelope_quantities/v1` |
+| `export_computed_base_quantities` | `<stem>_computed_quantities.json` | `computed_base_quantities/v1` |
+
+Chaque document porte `schema`, `source` (producteur, outil, version, maquette),
+`created_at`, et ses données métier — `summary` / `par_type` /
+`hors_filtre_type` pour l'enveloppe, `quantities` / `coverage` pour les
+quantités. Les payloads sont **validés avant écriture** : un document non
+conforme fait échouer l'outil au lieu de produire un fichier douteux.
+
+Ce sont des documents **V1 d'origine**, jamais des payloads historiques migrés :
+ils sont acceptés par bim-core sans avertissement de compat et passent le mode
+strict `BIM_CORE_JSON_STRICT_SCHEMA=true` (test `tests/test_emitted_contracts.py`).
+
+Les cinq JSON de findings préliminaires (`*_space_inventory.json`,
+`*_space_clash_findings.json`, `*_surface_loss.json`, `*_boundaries.json`,
+`*_openings_check.json`) ne sont **pas encore** contractualisés : leur forme
+reste verrouillée par `tests/test_contract.py`.
 
 ## Détails géométriques
 

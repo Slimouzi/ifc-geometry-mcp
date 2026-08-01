@@ -67,25 +67,35 @@ def test_par_type_is_filtered_facade_by_type():
     assert len(par) == 1  # un seul type de façade
     e = par[0]
     assert e["type"] == "MUR EXT 25"
-    assert e["netsidearea_m2"] == pytest.approx(150.0)
-    assert e["nombre"] == 2
+    # Noms canoniques du contrat V1 (plus d'alias `netsidearea_m2` / `nombre`).
+    assert e["net_side_area_m2"] == pytest.approx(150.0)
+    assert e["n"] == 2
+    assert e["etages"] == sorted(e["etages"])  # liste, jamais une chaîne jointe
 
 
 def test_hors_filtre_excluded_from_facade_total():
     payload = envelope.run(_model(), file_name="mn.ifc")
+    summary = payload["summary"]
     # Le mur intérieur est en hors_filtre, PAS dans le total façade.
-    assert payload["superficie_facades_nette_m2"] == pytest.approx(150.0)
+    assert summary["superficie_facades_nette_m2"] == pytest.approx(150.0)
     hors = {h["type"] for h in payload["hors_filtre_type"]}
     assert "MUR INT 10" in hors
-    assert payload["superficie_calque_total_m2"] == pytest.approx(180.0)  # 150 + 30
+    assert summary["superficie_calque_total_m2"] == pytest.approx(180.0)  # 150 + 30
 
 
 def test_menuiseries_split_fenetres_portes():
-    payload = envelope.run(_model(), file_name="mn.ifc")
-    assert payload["superficie_menuiseries_fenetres_m2"] == pytest.approx(1.2)
-    assert payload["superficie_menuiseries_portes_m2"] == pytest.approx(1.89)
+    summary = envelope.run(_model(), file_name="mn.ifc")["summary"]
+    assert summary["superficie_menuiseries_fenetres_m2"] == pytest.approx(1.2)
+    assert summary["superficie_menuiseries_portes_m2"] == pytest.approx(1.89)
 
 
-def test_seuil_i3f_alias_present():
+def test_seuil_is_carried_under_its_canonical_name():
+    """Le contrat V1 n'a plus qu'un nom pour le seuil : `seuil_i3f`.
+
+    Le doublon `seuil_3f`/`seuil_i3f` n'existait que pour satisfaire un
+    consommateur qui lisait l'un ou l'autre — la normalisation vit désormais
+    dans bim-core.
+    """
     payload = envelope.run(_model(), file_name="mn.ifc", seuil_3f=0.9)
-    assert payload["seuil_i3f"] == 0.9 and payload["seuil_3f"] == 0.9
+    assert payload["summary"]["seuil_i3f"] == 0.9
+    assert "seuil_3f" not in payload["summary"]

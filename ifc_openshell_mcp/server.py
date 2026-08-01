@@ -26,6 +26,7 @@ from .analyzers import (
     space_clash,
     surface_loss,
 )
+from .contracts import validate_emitted_envelope, validate_emitted_quantities
 from .enrichers import base_quantities
 from .safe_paths import safe_input_path, safe_output_path
 
@@ -246,17 +247,20 @@ def extract_envelope_surfaces(
     """
     model, safe = _load(ifc_path)
     payload = envelope.run(model, file_name=safe.name, seuil_3f=seuil_3f)
+    validate_emitted_envelope(payload)  # conformité V1 garantie AVANT écriture
     json_path = _write(safe.stem, "_envelope.json", payload, overwrite)
     xlsx_path = safe_output_path(f"{safe.stem}_enveloppe.xlsx", overwrite=overwrite)
     envelope.write_xlsx(payload, str(xlsx_path))
+    summary = payload["summary"]
     return {
         "json_path": json_path,
         "xlsx_path": str(xlsx_path),
-        "superficie_facades_m2": payload["superficie_facades_m2"],
-        "superficie_menuiseries_m2": payload["superficie_menuiseries_m2"],
-        "shab_m2": payload["shab_m2"],
-        "ratio_fac_shab": payload["ratio_fac_shab"],
-        "counts": payload["counts"],
+        "schema": payload["schema"],
+        "superficie_facades_m2": summary["superficie_facades_m2"],
+        "superficie_menuiseries_m2": summary["superficie_menuiseries_m2"],
+        "shab_m2": summary["shab_m2"],
+        "ratio_fac_shab": summary["ratio_fac_shab"],
+        "counts": payload["diagnostics"]["counts"],
     }
 
 
@@ -431,12 +435,13 @@ def export_computed_base_quantities(
     """
     model, safe = _load(ifc_path)
     payload = base_quantities.export_computed_quantities(
-        model, classes=classes, precision=precision
+        model, classes=classes, precision=precision, ifc_file=str(safe)
     )
-    payload = {"source_ifc": str(safe), **payload}
+    validate_emitted_quantities(payload)  # conformité V1 garantie AVANT écriture
     json_path = _write(safe.stem, "_computed_quantities.json", payload, overwrite)
     return {
         "json_path": json_path,
+        "schema": payload["schema"],
         "coverage": payload["coverage"],
         "n_quantities": len(payload["quantities"]),
     }
