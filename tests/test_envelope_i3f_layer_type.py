@@ -53,6 +53,17 @@ TYPES_HABILLAGE = [("Métal - Zinc 50", 3, 120.5), ("Bois - Bardage 22", 2, 80.2
 SHAB_ATTENDUE = 2164.68
 RATIO_ATTENDU = 0.9568
 
+# Annexes non habitables, RATTACHÉES À UNE ZONE : elles seraient donc comptées
+# dans la SHAB si leur exclusion échouait. Une par chemin d'exclusion.
+ANNEXES_ZONEES = [
+    ("CAVE", 300.0),  # normalisé -> cave
+    ("BALCON", 12.0),  # normalisé -> exterieur
+    ("LOCAL TECHNIQUE", 18.0),  # normalisé -> technique
+    ("GARAGE", 25.0),  # normalisé -> autre : exclu sur le libellé brut
+    ("CAGE D'ESCALIER", 30.0),  # normalisé -> autre : idem
+]
+SHAB_EXCLUSIONS_ATTENDUES = sum(a for _, a in ANNEXES_ZONEES)
+
 
 def _model():
     f = ifcopenshell.api.project.create_file(version="IFC4")
@@ -127,17 +138,23 @@ def _model():
             properties={"NetFloorArea": float(area)},
         )
         zoned.append(sp)
-    # Annexe zonée : exclue de la SHAB par son type (cave).
-    cave = ifcopenshell.api.root.create_entity(f, ifc_class="IfcSpace", name="CAVE")
-    ifcopenshell.api.aggregate.assign_object(f, products=[cave], relating_object=storey)
-    ifcopenshell.api.pset.edit_qto(
-        f,
-        qto=ifcopenshell.api.pset.add_qto(
-            f, product=cave, name="Qto_SpaceBaseQuantities"
-        ),
-        properties={"NetFloorArea": 300.0},
-    )
-    zoned.append(cave)
+    # Annexes ZONÉES : présentes dans un logement mais non habitables. Chacune
+    # emprunte un chemin d'exclusion différent — type normalisé pour CAVE
+    # (`cave`), BALCON (`exterieur`) et LOCAL TECHNIQUE (`technique`), libellé
+    # brut pour GARAGE et ESCALIER que la normalisation classe en `autre`.
+    for nom, area in ANNEXES_ZONEES:
+        annexe = ifcopenshell.api.root.create_entity(f, ifc_class="IfcSpace", name=nom)
+        ifcopenshell.api.aggregate.assign_object(
+            f, products=[annexe], relating_object=storey
+        )
+        ifcopenshell.api.pset.edit_qto(
+            f,
+            qto=ifcopenshell.api.pset.add_qto(
+                f, product=annexe, name="Qto_SpaceBaseQuantities"
+            ),
+            properties={"NetFloorArea": float(area)},
+        )
+        zoned.append(annexe)
     ifcopenshell.api.group.assign_group(f, products=zoned, group=zone)
 
     # Pièce HORS zone : n'appartient à aucun logement → hors SHAB.
@@ -209,10 +226,42 @@ def test_facade_total_matches_reference(payload):
 
 
 def test_shab_counts_only_zoned_non_annex_spaces(payload):
-    # 1200 + 964,68 retenues ; cave (zonée) et circulation (hors zone) exclues.
+    # 1200 + 964,68 retenues ; les 5 annexes zonées et la circulation hors zone
+    # sont exclues. Si UNE seule exclusion échouait, la SHAB augmenterait.
     assert payload["summary"]["shab_m2"] == pytest.approx(SHAB_ATTENDUE, abs=0.05)
     assert payload["diagnostics"]["counts"]["n_pieces_shab"] == 2
-    assert payload["diagnostics"]["shab_exclusions_m2"] == pytest.approx(300.0)
+    assert payload["diagnostics"]["shab_exclusions_m2"] == pytest.approx(
+        SHAB_EXCLUSIONS_ATTENDUES
+    )
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "CAVE",
+        "CELLIER",
+        "BALCON",
+        "TERRASSE",
+        "LOGGIA",
+        "LOCAL TECHNIQUE",
+        "GARAGE",
+        "CAGE D'ESCALIER",
+    ],
+)
+def test_annexes_are_excluded_from_i3f_shab(label):
+    """Chaque annexe est exclue, quel que soit son chemin d'exclusion.
+
+    ``normalize_room_type`` ne rend PAS les libellés métier : « balcon » devient
+    ``exterieur``, « local technique » ``technique``, et « garage » / « escalier »
+    retombent sur ``autre``. Comparer les libellés métier au type normalisé
+    n'excluait donc que ``cave`` et ``cellier``.
+    """
+    assert envelope._is_i3f_shab_excluded(label) is True
+
+
+@pytest.mark.parametrize("label", ["SEJOUR", "CHAMBRE 01", "CUISINE", "SALLE DE BAIN"])
+def test_habitable_rooms_are_kept_in_i3f_shab(label):
+    assert envelope._is_i3f_shab_excluded(label) is False
 
 
 def test_ratio_matches_reference(payload):

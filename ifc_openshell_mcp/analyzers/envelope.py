@@ -31,9 +31,26 @@ _WALL_TYPES = ("IfcWall", "IfcWallStandardCase")
 _CURTAIN_TYPES = ("IfcCurtainWall",)
 # Pièces exclues de la surface habitable (annexes non chauffées / extérieur).
 _SHAB_EXCLUDE = {"cave", "cellier", "parking", "technique", "exterieur"}
-# Annexes non habitables exclues de la SHAB **I3F** (mode calque). Jeu distinct
-# du précédent : c'est celui de l'extraction de référence Tarare 0546L.
-_SHAB_EXCLUDE_I3F = {"cellier", "cave", "balcon", "garage", "escalier", "local"}
+# Annexes non habitables exclues de la SHAB **I3F** (mode calque) — jeu de
+# l'extraction de référence Tarare 0546L : cellier, cave, balcon, garage,
+# escalier, local technique.
+#
+# Ces libellés métier ne sont PAS les valeurs rendues par
+# ``normalize_room_type`` : « balcon » y devient ``exterieur``, « local
+# technique » ``technique``, et « garage » / « escalier » n'ont aucun motif et
+# retombent sur ``autre``. Comparer les libellés métier au type normalisé
+# n'exclurait donc que ``cave`` et ``cellier``, et laisserait un garage zoné
+# gonfler la SHAB — donc fausser le ratio FAC/SHAB. D'où deux niveaux.
+_SHAB_EXCLUDE_I3F_TYPES = frozenset({"cave", "cellier", "exterieur", "technique"})
+# Repli sur le libellé brut, pour ce que la normalisation ne distingue pas.
+_SHAB_EXCLUDE_I3F_RAW = re.compile(r"garage|escalier", re.I)
+
+
+def _is_i3f_shab_excluded(label: str | None) -> bool:
+    """La pièce est-elle une annexe non habitable au sens I3F ?"""
+    if normalize_room_type(label) in _SHAB_EXCLUDE_I3F_TYPES:
+        return True
+    return bool(_SHAB_EXCLUDE_I3F_RAW.search(label or ""))
 
 
 _WALL_LIKE = {"IfcWall", "IfcWallStandardCase", "IfcCurtainWall"}
@@ -333,7 +350,7 @@ def _shab_zoned(model) -> tuple[float, int, float]:
         if not area:
             continue
         label = ifc_utils.space_long_name(sp) or sp.Name or ""
-        if normalize_room_type(label) in _SHAB_EXCLUDE_I3F:
+        if _is_i3f_shab_excluded(label):
             excluded += area
             continue
         total += area
@@ -556,7 +573,8 @@ def _run_i3f(
                 "n_menuiseries": men["n"],
                 "n_pieces_shab": n_shab,
             },
-            "shab_types_exclus": sorted(_SHAB_EXCLUDE_I3F),
+            "shab_types_exclus": sorted(_SHAB_EXCLUDE_I3F_TYPES)
+            + [_SHAB_EXCLUDE_I3F_RAW.pattern],
             "shab_exclusions_m2": round(shab_exclu, 2),
             "menuiseries_detail": men["detail"],
         },
