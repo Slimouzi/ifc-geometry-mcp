@@ -18,8 +18,10 @@ valeur numérique en colonne B ; table détaillée ancrée sur « Composant »).
 
 from __future__ import annotations
 
+from bim_core.contracts import SCHEMA_ENVELOPE_QUANTITIES_V1
 
 from .. import ifc_utils
+from ..contracts import contract_source, utc_now_iso
 from .spaces import normalize_room_type
 
 _WALL_TYPES = ("IfcWall", "IfcWallStandardCase")
@@ -75,13 +77,19 @@ def _wall_side_area(el) -> float | None:
 
 
 def _finalize_by_type(buckets: dict) -> list[dict]:
+    """Lignes ``par_type`` aux **noms canoniques du contrat V1**.
+
+    Les anciens noms (``netsidearea_m2``, ``nombre``, ``etages`` concaténés en
+    une chaîne) étaient précisément les alias que bim-core doit normaliser à la
+    lecture d'un fichier historique : un producteur à jour ne les émet plus.
+    """
     return sorted(
         (
             {
                 "type": b["type"],
-                "etages": " / ".join(sorted(b["etages"])),
-                "netsidearea_m2": round(b["netsidearea_m2"], 2),
-                "nombre": b["nombre"],
+                "etages": sorted(b["etages"]),
+                "net_side_area_m2": round(b["netsidearea_m2"], 2),
+                "n": b["nombre"],
             }
             for b in buckets.values()
         ),
@@ -219,6 +227,14 @@ def _shab(model) -> tuple[float, int]:
 
 
 def run(model, file_name: str, *, seuil_3f: float | None = None) -> dict:
+    """Produit le document ``envelope_quantities/v1`` (contrat bim-core).
+
+    Le document est **construit directement au format V1** : il n'est jamais
+    assemblé à plat puis migré. ``summary`` porte les totaux métier, ``par_type``
+    la décomposition qui alimente l'annexe MOA, ``hors_filtre_type`` les types
+    écartés du total, et ``diagnostics`` ce qui éclaire le calcul sans jamais
+    entrer dans un total (compteurs, détail des menuiseries, méthode).
+    """
     fac = _facades(model)
     men = _menuiseries(model)
     facade_net = fac["facade_net"]
@@ -227,32 +243,38 @@ def run(model, file_name: str, *, seuil_3f: float | None = None) -> dict:
     ratio = (facade_gross / shab) if shab else None
 
     return {
-        "file": file_name,
-        # Total métier = murs extérieurs (par_type), menuiseries incluses.
-        "superficie_facades_m2": facade_gross,
-        "superficie_facades_nette_m2": facade_net,
-        # Total « brut » avant filtrage (tous murs) — jamais le total métier.
-        "superficie_calque_total_m2": fac["calque_total"],
-        "superficie_menuiseries_m2": round(men["total"], 2),
-        "superficie_menuiseries_fenetres_m2": round(men["fenetres"], 2),
-        "superficie_menuiseries_portes_m2": round(men["portes"], 2),
-        "shab_m2": round(shab, 2),
-        "ratio_fac_shab": round(ratio, 3) if ratio is not None else None,
-        "seuil_3f": seuil_3f,
-        "seuil_i3f": seuil_3f,  # alias attendu par le consommateur audit-bim
-        "methode_facade": fac["method"],
+        "schema": SCHEMA_ENVELOPE_QUANTITIES_V1,
+        "source": contract_source("extract_envelope_surfaces", file_name),
+        "created_at": utc_now_iso(),
+        "summary": {
+            # Total métier = murs extérieurs (par_type), menuiseries incluses.
+            "superficie_facades_m2": facade_gross,
+            "superficie_facades_nette_m2": facade_net,
+            # Total « brut » avant filtrage (tous murs) — jamais le total métier.
+            "superficie_calque_total_m2": fac["calque_total"],
+            "superficie_menuiseries_m2": round(men["total"], 2),
+            "superficie_menuiseries_fenetres_m2": round(men["fenetres"], 2),
+            "superficie_menuiseries_portes_m2": round(men["portes"], 2),
+            "shab_m2": round(shab, 2),
+            "ratio_fac_shab": round(ratio, 3) if ratio is not None else None,
+            "seuil_i3f": seuil_3f,
+            "methode_facade": fac["method"],
+        },
         # Décomposition métier (colonnes MOA) vs diagnostic (hors filtre).
         "par_type": fac["par_type"],
         "hors_filtre_type": fac["hors_filtre_type"],
-        "counts": {
-            "n_murs_exterieurs": fac["n_ext"],
-            "n_facades_fallback_geom": fac["n_geom_fallback"],
-            "n_types_facade": len(fac["par_type"]),
-            "n_types_hors_filtre": len(fac["hors_filtre_type"]),
-            "n_menuiseries": men["n"],
-            "n_pieces_shab": n_shab,
+        # Hors total métier, par construction : compteurs et détails d'appui.
+        "diagnostics": {
+            "counts": {
+                "n_murs_exterieurs": fac["n_ext"],
+                "n_facades_fallback_geom": fac["n_geom_fallback"],
+                "n_types_facade": len(fac["par_type"]),
+                "n_types_hors_filtre": len(fac["hors_filtre_type"]),
+                "n_menuiseries": men["n"],
+                "n_pieces_shab": n_shab,
+            },
+            "menuiseries_detail": men["detail"],
         },
-        "menuiseries_detail": men["detail"],
     }
 
 
@@ -260,7 +282,16 @@ def run(model, file_name: str, *, seuil_3f: float | None = None) -> dict:
 #  Écriture du classeur .xlsx au format read_enveloppe (avp_sources)
 # --------------------------------------------------------------------------- #
 def write_xlsx(payload: dict, path: str) -> None:
+    """Classeur d'appoint, lu par ``read_enveloppe`` (avp_sources).
+
+    Consomme le document ``envelope_quantities/v1`` : totaux dans ``summary``,
+    détails dans ``diagnostics``.
+    """
     import openpyxl
+
+    summary = payload.get("summary") or {}
+    diagnostics = payload.get("diagnostics") or {}
+    source = payload.get("source") or {}
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -269,17 +300,17 @@ def write_xlsx(payload: dict, path: str) -> None:
     ws["A1"] = (
         "BIMDATA — EXTRACTION SURFACE ENVELOPPE (calcul géométrique IfcOpenShell)"
     )
-    ws["A2"] = f"Fichier : {payload.get('file')}"
+    ws["A2"] = f"Fichier : {source.get('ifc_file')}"
 
     # Bloc synthèse : libellé en A, valeur numérique en B (lu par _scan_value).
     synth = [
-        ("Superficie des façades", payload.get("superficie_facades_m2")),
-        ("Superficie des menuiseries", payload.get("superficie_menuiseries_m2")),
-        ("SHAB", payload.get("shab_m2")),
-        ("ratio FAC/SHAB", payload.get("ratio_fac_shab")),
+        ("Superficie des façades", summary.get("superficie_facades_m2")),
+        ("Superficie des menuiseries", summary.get("superficie_menuiseries_m2")),
+        ("SHAB", summary.get("shab_m2")),
+        ("ratio FAC/SHAB", summary.get("ratio_fac_shab")),
     ]
-    if payload.get("seuil_3f") is not None:
-        synth.append(("Seuil 3F 2026", payload.get("seuil_3f")))
+    if summary.get("seuil_i3f") is not None:
+        synth.append(("Seuil 3F 2026", summary.get("seuil_i3f")))
 
     ws["A4"] = "Synthèse"
     r = 5
@@ -294,7 +325,7 @@ def write_xlsx(payload: dict, path: str) -> None:
     for c, h in enumerate(headers, start=1):
         ws.cell(r, c, h)
     r += 1
-    for d in payload.get("menuiseries_detail", []):
+    for d in diagnostics.get("menuiseries_detail") or []:
         ws.cell(r, 1, d.get("name"))
         ws.cell(r, 2, d.get("type"))
         ws.cell(r, 3, d.get("largeur_m"))

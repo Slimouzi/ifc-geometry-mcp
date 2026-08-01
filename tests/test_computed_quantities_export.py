@@ -128,7 +128,10 @@ def test_export_writes_json_with_schema_and_fields(env):
     res = server.export_computed_base_quantities("maquette.ifc")
     doc = _load_json(res["json_path"])
     assert doc["schema"] == "computed_base_quantities/v1"
-    assert doc["source_ifc"].endswith("maquette.ifc")
+    assert doc["source"]["ifc_file"].endswith("maquette.ifc")
+    assert doc["source"]["producer"] == "ifc-geometry"
+    assert doc["source"]["tool"] == "export_computed_base_quantities"
+    assert doc["created_at"]
     assert doc["quantities"], "au moins une quantité calculée"
     for q in doc["quantities"]:
         assert _REQUIRED_FIELDS <= set(q), (
