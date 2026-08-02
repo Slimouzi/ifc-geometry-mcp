@@ -19,6 +19,7 @@ valeur numérique en colonne B ; table détaillée ancrée sur « Composant »).
 from __future__ import annotations
 
 import re
+import warnings
 
 import ifcopenshell.util.element as ue
 from bim_core.contracts import SCHEMA_ENVELOPE_QUANTITIES_V1
@@ -585,11 +586,26 @@ def _run_i3f(
 #  Écriture du classeur .xlsx au format read_enveloppe (avp_sources)
 # --------------------------------------------------------------------------- #
 def write_xlsx(payload: dict, path: str) -> None:
-    """Classeur d'appoint, lu par ``read_enveloppe`` (avp_sources).
+    """**LEGACY** — classeur d'appoint, conservé pour compatibilité.
 
     Consomme le document ``envelope_quantities/v1`` : totaux dans ``summary``,
     détails dans ``diagnostics``.
+
+    .. deprecated::
+        Ce MCP **calcule** ; la mise en forme client (XLSX, DOCX, PDF) relève
+        d'``audit-bim-i3f``, qui consomme le contrat JSON. Produire un classeur
+        ici dupliquerait la charte MOA dans deux dépôts, avec deux vérités
+        possibles. Remplacement : passer ``<stem>_envelope.json`` en
+        ``envelope_json`` à ``generate_avp_i3f_pack`` (ou le laisser le
+        résoudre seul).
     """
+    warnings.warn(
+        "envelope.write_xlsx est LEGACY : le flux officiel est le contrat JSON "
+        "``envelope_quantities/v1``, mis en forme par audit-bim-i3f "
+        "(``generate_avp_i3f_pack``).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     import openpyxl
 
     summary = payload.get("summary") or {}
