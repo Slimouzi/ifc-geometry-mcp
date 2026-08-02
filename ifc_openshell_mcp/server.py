@@ -234,12 +234,18 @@ def extract_envelope_surfaces(
     overwrite: bool = False,
     layer_pattern: str | None = None,
     type_pattern: str | None = None,
+    legacy_xlsx: bool = False,
 ) -> dict[str, Any]:
     """Calcule les surfaces d'enveloppe (façades, menuiseries, SHAB, ratio).
 
-    Écrit ``<stem>_envelope.json`` ET ``<stem>_enveloppe.xlsx`` (ce dernier au
-    format attendu par le pack I3F — à passer en ``enveloppe_xlsx`` à
-    ``generate_avp_i3f_pack``).
+    **Sortie officielle : le contrat JSON** ``<stem>_envelope.json``
+    (``envelope_quantities/v1``), à passer en ``envelope_json`` à
+    ``generate_avp_i3f_pack`` — ou résolu automatiquement par lui.
+
+    Le classeur ``<stem>_enveloppe.xlsx`` est **LEGACY** et n'est plus écrit par
+    défaut : la mise en forme client relève d'audit-bim-i3f, pas du calcul.
+    ``legacy_xlsx=True`` le produit encore, pour les usages qui en dépendent
+    le temps de leur migration.
 
     Deux modes de sélection des murs d'enveloppe :
 
@@ -261,6 +267,8 @@ def extract_envelope_surfaces(
             du calque, ex. ``"^ME[ _]"``. Les types du calque hors filtre sont
             listés dans ``hors_filtre_type``, hors total métier. Vide → tous les
             murs du calque sont retenus.
+        legacy_xlsx: produit en plus le classeur ``.xlsx`` **legacy**. Déprécié :
+            le flux officiel est le JSON, mis en forme par audit-bim-i3f.
     """
     model, safe = _load(ifc_path)
     payload = envelope.run(
@@ -272,12 +280,15 @@ def extract_envelope_surfaces(
     )
     validate_emitted_envelope(payload)  # conformité V1 garantie AVANT écriture
     json_path = _write(safe.stem, "_envelope.json", payload, overwrite)
-    xlsx_path = safe_output_path(f"{safe.stem}_enveloppe.xlsx", overwrite=overwrite)
-    envelope.write_xlsx(payload, str(xlsx_path))
+    xlsx_path: str | None = None
+    if legacy_xlsx:
+        cible = safe_output_path(f"{safe.stem}_enveloppe.xlsx", overwrite=overwrite)
+        envelope.write_xlsx(payload, str(cible))
+        xlsx_path = str(cible)
     summary = payload["summary"]
     return {
         "json_path": json_path,
-        "xlsx_path": str(xlsx_path),
+        "xlsx_path": xlsx_path,
         "schema": payload["schema"],
         "superficie_facades_m2": summary["superficie_facades_m2"],
         "superficie_menuiseries_m2": summary["superficie_menuiseries_m2"],

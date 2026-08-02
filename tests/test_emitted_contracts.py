@@ -227,3 +227,37 @@ def test_emitted_quantities_are_indexable_by_global_id(env):
     # Le tableau reste PLAT dans le fichier (format déjà émis en production).
     doc = json.loads(open(res["json_path"], encoding="utf-8").read())
     assert isinstance(doc["quantities"], list)
+
+
+# ── flux principal : JSON seulement ────────────────────────────────────
+
+
+def test_no_xlsx_is_written_by_default(env):
+    """Le flux officiel est JSON-only : aucun classeur produit sans le demander."""
+    _in_dir, out_dir = env
+    res = server.extract_envelope_surfaces("maquette.ifc")
+
+    assert res["json_path"].endswith("_envelope.json")
+    assert res["xlsx_path"] is None
+    assert list(out_dir.glob("*.xlsx")) == [], "la mise en forme relève d'audit-bim-i3f"
+
+
+def test_legacy_xlsx_is_opt_in_and_warns(env):
+    """Le classeur reste produisible, mais explicitement et avec avertissement."""
+    _in_dir, out_dir = env
+    with pytest.warns(DeprecationWarning, match="LEGACY"):
+        res = server.extract_envelope_surfaces("maquette.ifc", legacy_xlsx=True)
+
+    assert res["xlsx_path"] is not None
+    assert list(out_dir.glob("*.xlsx")), "le classeur legacy doit rester produisible"
+
+
+def test_json_remains_the_only_official_producer(env):
+    """Les deux contrats sont les sorties officielles du serveur."""
+    from bim_core.contracts import KNOWN_SCHEMAS
+
+    env_res = server.extract_envelope_surfaces("maquette.ifc")
+    qty_res = server.export_computed_base_quantities("maquette.ifc")
+
+    assert env_res["schema"] in KNOWN_SCHEMAS
+    assert qty_res["schema"] in KNOWN_SCHEMAS

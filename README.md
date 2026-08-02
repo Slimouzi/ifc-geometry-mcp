@@ -99,6 +99,15 @@ Deux sorties sont des **contrats versionnés** définis dans
 | `extract_envelope_surfaces` | `<stem>_envelope.json` | `envelope_quantities/v1` |
 | `export_computed_base_quantities` | `<stem>_computed_quantities.json` | `computed_base_quantities/v1` |
 
+**Ce sont les sorties officielles du serveur.** Ce MCP *calcule* ; la mise en
+forme client (XLSX, DOCX, PDF) relève d'`audit-bim-i3f`, qui consomme ces JSON.
+`extract_envelope_surfaces` sait encore produire un classeur `.xlsx`, mais il
+est **LEGACY** : plus écrit par défaut, disponible via `legacy_xlsx=True`, et
+émettant un `DeprecationWarning`. Le remplacement est de passer
+`<stem>_envelope.json` en `envelope_json` à `generate_avp_i3f_pack` — ou de
+laisser ce dernier le résoudre seul. Dupliquer la charte MOA dans deux dépôts
+créerait deux vérités possibles pour un même livrable.
+
 Chaque document porte `schema`, `source` (producteur, outil, version, maquette),
 `created_at`, et ses données métier — `summary` / `par_type` /
 `hors_filtre_type` pour l'enveloppe, `quantities` / `coverage` pour les

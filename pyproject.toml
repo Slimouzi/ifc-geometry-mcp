@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ifc-geometry-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Serveur MCP ifc-geometry d'audit géométrique IFC (moteur IfcOpenShell) — clash espaces, inventaire pièces/zones, pertes de surface, limites d'espaces et correspondance d'ouvertures. Produit les JSON consommés par audit-bim-i3f (import_preliminary_findings)."
 readme = "README.md"
 requires-python = ">=3.10"
