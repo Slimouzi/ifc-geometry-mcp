@@ -9,3 +9,8 @@ out/
 .pytest_cache/
 .ruff_cache/
 .DS_Store
+
+# Lock uv : ce dépôt s'installe via pip (CI incluse) et résout ses dépendances
+# first-party par tags Git. Un lock non suivi évite qu'un `git add -A` ne
+# l'embarque par accident dans une PR sans rapport.
+uv.lock
