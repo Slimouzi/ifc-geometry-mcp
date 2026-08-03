@@ -37,10 +37,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - name: Install bim-sandbox (tagged shared sandbox)
-        run: pip install "git+https://github.com/Slimouzi/bim-sandbox.git@bim-sandbox-v0.1.0"
-      - name: Install bim-core (tagged JSON contracts)
-        run: pip install "git+https://github.com/Slimouzi/bim-core.git@bim-core-v0.2.0"
+      - name: Install bim-core (tagged JSON contracts + path sandbox)
+        run: pip install "git+https://github.com/Slimouzi/bim-core.git@bim-core-v0.3.0"
       - name: Install package + dev deps
         run: |
           python -m pip install --upgrade pip
