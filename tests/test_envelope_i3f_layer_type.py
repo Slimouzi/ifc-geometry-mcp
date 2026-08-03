@@ -316,11 +316,18 @@ def test_wall_counts_are_reported(payload):
 
 
 def test_filters_are_recorded_in_diagnostics(payload):
-    """Les motifs employés sont dans le JSON : la sélection est auditable."""
-    assert payload["diagnostics"]["filters"] == {
-        "layer_pattern": LAYER_PATTERN,
-        "type_pattern": TYPE_PATTERN,
-    }
+    """Les motifs ET leur effet sont dans le JSON : la sélection est auditable.
+
+    Les motifs seuls ne permettent pas de relire un résultat — il faut voir ce
+    qu'ils ont retenu et ce qu'ils ont écarté pour constater, sans rouvrir l'IFC,
+    qu'une couche de façade manque ou qu'un habillage a été compté.
+    """
+    filtres = payload["diagnostics"]["filters"]
+    assert filtres["mode"] == "layer_type_filter"
+    assert filtres["layer_pattern"] == LAYER_PATTERN
+    assert filtres["type_pattern"] == TYPE_PATTERN
+    assert filtres["types_retenus"] == sorted(n for n, _, _ in TYPES_METIER)
+    assert filtres["types_rejetes"] == sorted(n for n, _, _ in TYPES_HABILLAGE)
     assert payload["summary"]["methode_facade"] == "layer_type_filter"
 
 
@@ -333,7 +340,13 @@ def test_without_type_pattern_all_layer_walls_are_retained():
 
 
 def test_geometric_mode_remains_the_default():
-    """Sans `layer_pattern`, le comportement historique est inchangé."""
+    """Sans aucun motif, la sélection géométrique reste le comportement par défaut."""
     doc = envelope.run(_model(), file_name="s.ifc")
     assert doc["summary"]["methode_facade"] in ("space_boundaries", "is_external_flag")
-    assert "filters" not in doc["diagnostics"]
+    # La trace de filtre existe désormais dans les TROIS modes : un contrat sans
+    # bloc ``filters`` laissait le lecteur deviner par quel chemin le total avait
+    # été obtenu. Ici elle dit « aucun motif appliqué ».
+    filtres = doc["diagnostics"]["filters"]
+    assert filtres["mode"] == "geometric"
+    assert filtres["layer_pattern"] is None
+    assert filtres["type_pattern"] is None

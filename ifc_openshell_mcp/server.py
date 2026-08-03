@@ -234,6 +234,7 @@ def extract_envelope_surfaces(
     overwrite: bool = False,
     layer_pattern: str | None = None,
     type_pattern: str | None = None,
+    filter_mode: str | None = None,
     legacy_xlsx: bool = False,
 ) -> dict[str, Any]:
     """Calcule les surfaces d'enveloppe (façades, menuiseries, SHAB, ratio).
@@ -247,13 +248,26 @@ def extract_envelope_surfaces(
     ``legacy_xlsx=True`` le produit encore, pour les usages qui en dépendent
     le temps de leur migration.
 
-    Deux modes de sélection des murs d'enveloppe :
+    Trois modes de sélection des murs d'enveloppe :
 
-    - **calque + type** dès que ``layer_pattern`` est fourni : sélection I3F,
-      reproduisant l'extraction de référence (le calque délimite l'enveloppe,
-      ``type_pattern`` sépare murs extérieurs et habillages) ;
-    - **géométrique** par défaut : murs marqués extérieurs (limites d'espace ou
+    - ``layer_type_filter`` dès que ``layer_pattern`` est fourni : sélection I3F
+      **ArchiCAD**, reproduisant l'extraction de référence (le calque délimite
+      l'enveloppe, ``type_pattern`` sépare murs extérieurs et habillages) ;
+    - ``geometric_type_filter`` dès que ``type_pattern`` est fourni **seul** :
+      maquettes **sans calque** (export Revit). Les murs extérieurs sont trouvés
+      géométriquement, puis ``type_pattern`` désigne la couche qui représente la
+      façade — sans lui, une façade modélisée en murs superposés (structure,
+      isolant, peau) serait comptée trois ou quatre fois ;
+    - ``geometric`` par défaut : murs marqués extérieurs (limites d'espace ou
       ``IsExternal``), sans hypothèse de convention de calque.
+
+    ``ratio_fac_shab`` a une définition **unique** dans les trois modes :
+    ``superficie_facades_nette_m2 / shab_m2``, menuiseries exclues — celle que
+    le livrable Excel calcule.
+
+    Le filtre appliqué est tracé dans ``diagnostics.filters`` (mode, motifs,
+    **types retenus et types rejetés**) : le résultat est rejouable à partir des
+    seuls paramètres, sans retouche du contrat après génération.
 
     Args:
         ifc_path: Chemin de la maquette IFC.
@@ -263,10 +277,19 @@ def extract_envelope_surfaces(
         layer_pattern: Expression régulière du **calque** des murs d'enveloppe,
             ex. ``"221|extérieurs? périphériques"`` (convention ArchiCAD I3F).
             Vide → sélection géométrique.
-        type_pattern: Expression régulière filtrant les **noms de type** au sein
-            du calque, ex. ``"^ME[ _]"``. Les types du calque hors filtre sont
-            listés dans ``hors_filtre_type``, hors total métier. Vide → tous les
-            murs du calque sont retenus.
+        type_pattern: Expression régulière filtrant les **noms de type** de mur.
+            Avec ``layer_pattern``, elle s'applique au sein du calque
+            (ex. ``"^ME[ _]"``) ; **seule**, elle s'applique aux murs extérieurs
+            géométriques — c'est le chemin des maquettes Revit, qui n'ont pas de
+            calque. Les types hors filtre sont listés dans ``hors_filtre_type``,
+            hors total métier. Le type métier est résolu via
+            ``IfcRelDefinesByType`` / ``IfcWallType.Name``, puis ``ObjectType``,
+            puis ``PredefinedType``.
+        filter_mode: force le mode au lieu de le déduire — ``layer_type_filter``,
+            ``geometric_type_filter`` ou ``geometric``. ``None`` (défaut) → déduit
+            des motifs fournis. Un mode demandé dont le motif manque est une
+            **erreur** : il se dégraderait sinon en silence vers une sélection
+            d'une autre nature, et le total changerait sans que rien ne le dise.
         legacy_xlsx: produit en plus le classeur ``.xlsx`` **legacy**. Déprécié :
             le flux officiel est le JSON, mis en forme par audit-bim-i3f.
     """
@@ -277,6 +300,7 @@ def extract_envelope_surfaces(
         seuil_3f=seuil_3f,
         layer_pattern=layer_pattern,
         type_pattern=type_pattern,
+        filter_mode=filter_mode,
     )
     validate_emitted_envelope(payload)  # conformité V1 garantie AVANT écriture
     json_path = _write(safe.stem, "_envelope.json", payload, overwrite)
@@ -294,6 +318,9 @@ def extract_envelope_surfaces(
         "superficie_menuiseries_m2": summary["superficie_menuiseries_m2"],
         "shab_m2": summary["shab_m2"],
         "ratio_fac_shab": summary["ratio_fac_shab"],
+        # Le mode effectivement appliqué, pour que l'appelant sache par quel
+        # chemin le total a été obtenu sans rouvrir le contrat.
+        "filter_mode": payload["diagnostics"]["filters"]["mode"],
         "counts": payload["diagnostics"]["counts"],
     }
 

@@ -9,7 +9,11 @@ Calcule, pour alimenter l'annexe I3F « Extraction surface enveloppe » :
   (largeur × hauteur d'emprise).
 - **SHAB** : surface habitable = somme des surfaces nettes des pièces, hors
   annexes (cave, cellier, parking, local technique, extérieur).
-- **ratio FAC/SHAB** : compacité de l'enveloppe (façade brute / SHAB).
+- **ratio FAC/SHAB** : compacité de l'enveloppe. Définition **unique** dans tous
+  les modes — ``superficie_facades_nette_m2 / shab_m2``, menuiseries **exclues**,
+  celle que le livrable Excel calcule. Deux définitions concurrentes du même
+  indicateur ont circulé (0,92 dans le classeur, 1,05 dans le contrat) : c'est
+  précisément ce que cette règle unique interdit.
 
 Produit un dict + un classeur .xlsx au format lu par
 ``audit_bim.reporting.avp_sources.read_enveloppe`` (libellé en colonne A,
@@ -86,28 +90,38 @@ def _wall_type(el) -> str:
 
     Ordre de résolution, du plus signifiant au moins signifiant :
 
-    1. le **type IFC** (``IfcWallType.Name``) — c'est là que vivent les noms de
-       composants ArchiCAD (« ME_R+1_Enduit_recoupement 530 x 2850 »).
+    1. le **type IFC** (``IfcWallType.Name``), atteint via
+       ``IfcRelDefinesByType``. C'est là que vivent les noms de composants
+       ArchiCAD (« ME_R+1_Enduit_recoupement 530 x 2850 ») comme les types
+       Revit (« Mur de base:BARDAGE BOIS 20mm + VENTIL 50mm »).
        ``ifcopenshell.util.element.get_type`` est utilisé plutôt que
        ``IsTypedBy`` : cette relation n'existe qu'en IFC4, alors que les
-       maquettes ArchiCAD I3F sont en **IFC2X3** (``IsDefinedBy`` →
-       ``IfcRelDefinesByType``) ;
-    2. ``ObjectType``, puis ``Name`` de l'instance ;
-    3. ``PredefinedType`` en **dernier recours** seulement — sur ArchiCAD il
-       vaut ``ELEMENTEDWALL`` pour tous les murs et écrase donc toute
-       décomposition métier en un type unique.
+       maquettes I3F — ArchiCAD comme Revit — sont en **IFC2X3**
+       (``IsDefinedBy`` → ``IfcRelDefinesByType``) ;
+    2. ``ObjectType`` — le repli des exports Revit qui ne portent pas de
+       ``IfcWallType`` nommé ;
+    3. ``PredefinedType``, en **dernier recours** : sur ArchiCAD il vaut
+       ``ELEMENTEDWALL`` pour tous les murs et écraserait la décomposition
+       métier en un type unique.
+
+    Le ``Name`` de l'**instance** reste en ultime filet, après
+    ``PredefinedType`` : sur Revit il porte l'identifiant de l'élément
+    (« Mur de base:MUR ENDUIT 20 mm:3566323 ») et produirait un type distinct
+    par mur — inexploitable comme clé de regroupement.
     """
     t = ue.get_type(el)
     tn = getattr(t, "Name", None) if t is not None else None
     if isinstance(tn, str) and tn.strip():
         return tn.strip()
-    for attr in ("ObjectType", "Name"):
-        v = getattr(el, attr, None)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
+    v = getattr(el, "ObjectType", None)
+    if isinstance(v, str) and v.strip():
+        return v.strip()
     pt = getattr(el, "PredefinedType", None)
     if isinstance(pt, str) and pt.strip() and pt != "NOTDEFINED":
         return pt.strip()
+    v = getattr(el, "Name", None)
+    if isinstance(v, str) and v.strip():
+        return v.strip()
     return el.is_a()
 
 
@@ -210,6 +224,73 @@ def _facades(model) -> dict:
         "method": method,
         "n_ext": n_ext,
         "n_geom_fallback": n_geom_fallback,
+    }
+
+
+def _facades_by_geometric_type(model, type_re) -> dict:
+    """Décomposition **Revit** : murs extérieurs géométriques, filtrés par type.
+
+    Le pendant de :func:`_facades_by_layer` pour les maquettes **sans calque**.
+    Un export Revit n'expose pas de calque ArchiCAD : la sélection I3F
+    « calque + type » n'y retient rien, et la sélection purement géométrique y
+    retient trop — chaque façade est modélisée en **murs superposés** (structure,
+    isolant, peau extérieure), si bien que sommer les murs extérieurs compte la
+    même façade trois ou quatre fois.
+
+    ``type_pattern`` tranche cette superposition : il désigne la couche qui
+    représente la façade. Les autres types restent listés en
+    ``hors_filtre_type``, **hors du total métier** — visibles pour l'audit, mais
+    jamais additionnés.
+    """
+    ext_guids, method_ext = _external_wall_guids(model)
+    par: dict[str, dict] = {}
+    hors: dict[str, dict] = {}
+    wall_types: dict[int, str] = {}
+    facade_net = calque_total = 0.0
+    n_retenus = n_ext = n_geom_fallback = 0
+
+    for t in (*_WALL_TYPES, *_CURTAIN_TYPES):
+        for el in model.by_type(t):
+            if el.GlobalId not in ext_guids:
+                continue
+            n_ext += 1
+            a = _wall_side_area(el)
+            if not a:
+                continue
+            if (
+                ifc_utils.quantity(el, "NetSideArea", "GrossSideArea", "GrossArea")
+                is None
+            ):
+                n_geom_fallback += 1
+            wt = _wall_type(el)
+            wall_types[el.id()] = wt
+            retenu = type_re is None or bool(type_re.search(wt))
+            b = (par if retenu else hors).setdefault(
+                wt, {"type": wt, "etages": set(), "netsidearea_m2": 0.0, "nombre": 0}
+            )
+            b["netsidearea_m2"] += a
+            b["nombre"] += 1
+            st = ifc_utils.storey_name(el)
+            if st:
+                b["etages"].add(str(st))
+            calque_total += a
+            if retenu:
+                facade_net += a
+                n_retenus += 1
+
+    return {
+        "par_type": _finalize_by_type(par),
+        "hors_filtre_type": _finalize_by_type(hors),
+        "facade_net": round(facade_net, 2),
+        # Total des murs extérieurs AVANT filtre de type : c'est la valeur qui
+        # compte plusieurs fois la même façade. Diagnostic, jamais un résultat.
+        "calque_total": round(calque_total, 2),
+        "method": "geometric_type_filter",
+        "method_exterieur": method_ext,
+        "n_ext": n_retenus,
+        "n_murs_exterieurs": n_ext,
+        "n_geom_fallback": n_geom_fallback,
+        "wall_types": wall_types,
     }
 
 
@@ -435,6 +516,53 @@ def _shab(model) -> tuple[float, int]:
     return total, n
 
 
+#: Modes de sélection des murs d'enveloppe. ``auto`` déduit le mode des motifs
+#: fournis ; les autres valeurs l'imposent, et le calcul échoue si le motif
+#: correspondant manque — un mode demandé qui se dégraderait en silence
+#: produirait un total d'une autre nature sans que rien ne le signale.
+FILTER_MODES = ("auto", "layer_type_filter", "geometric_type_filter", "geometric")
+
+
+class EnvelopeFilterModeError(ValueError):
+    """Mode de filtrage impossible à honorer avec les motifs fournis."""
+
+
+def resolve_filter_mode(
+    filter_mode: str | None, layer_pattern: str | None, type_pattern: str | None
+) -> str:
+    """Mode effectif, explicite ou déduit — et **jamais** dégradé en silence."""
+    mode = (filter_mode or "auto").strip()
+    if mode not in FILTER_MODES:
+        raise EnvelopeFilterModeError(
+            f"``filter_mode`` inconnu : {mode!r}. Valeurs acceptées : "
+            + ", ".join(FILTER_MODES)
+        )
+    if mode == "auto":
+        if layer_pattern:
+            return "layer_type_filter"
+        if type_pattern:
+            return "geometric_type_filter"
+        return "geometric"
+    if mode == "layer_type_filter" and not layer_pattern:
+        raise EnvelopeFilterModeError(
+            "``filter_mode='layer_type_filter'`` exige ``layer_pattern`` : c'est "
+            "le calque qui délimite l'enveloppe dans ce mode."
+        )
+    if mode == "geometric_type_filter" and not type_pattern:
+        raise EnvelopeFilterModeError(
+            "``filter_mode='geometric_type_filter'`` exige ``type_pattern`` : sans "
+            "lui, la sélection retiendrait tous les murs extérieurs et compterait "
+            "plusieurs fois la même façade sur une maquette multicouche."
+        )
+    if mode == "geometric" and (layer_pattern or type_pattern):
+        raise EnvelopeFilterModeError(
+            "``filter_mode='geometric'`` n'applique aucun motif : "
+            "``layer_pattern`` / ``type_pattern`` seraient ignorés en silence. "
+            "Retirer les motifs, ou choisir le mode qui les emploie."
+        )
+    return mode
+
+
 def run(
     model,
     file_name: str,
@@ -442,32 +570,51 @@ def run(
     seuil_3f: float | None = None,
     layer_pattern: str | None = None,
     type_pattern: str | None = None,
+    filter_mode: str | None = None,
 ) -> dict:
     """Produit le document ``envelope_quantities/v1`` (contrat bim-core).
 
-    Deux modes de sélection des murs d'enveloppe :
+    Trois modes de sélection des murs d'enveloppe :
 
-    - **calque + type** (``layer_pattern`` fourni) — sélection I3F : le calque
-      délimite l'enveloppe, ``type_pattern`` sépare murs extérieurs et
-      habillages. Total façade = ``NetSideArea`` des types retenus, menuiseries
-      comptées **sur ces murs**, SHAB restreinte aux pièces zonées hors annexes.
-      C'est le mode qui reproduit l'extraction de référence.
-    - **géométrique** (défaut) — murs marqués extérieurs (limites d'espace ou
-      ``IsExternal``), total façade menuiseries incluses. Conservé tel quel :
-      il ne suppose aucune convention de calque.
+    - ``layer_type_filter`` (``layer_pattern`` fourni) — sélection I3F
+      **ArchiCAD** : le calque délimite l'enveloppe, ``type_pattern`` sépare
+      murs extérieurs et habillages. Total façade = ``NetSideArea`` des types
+      retenus, menuiseries comptées **sur ces murs**, SHAB restreinte aux pièces
+      zonées hors annexes. C'est le mode qui reproduit l'extraction de référence ;
+    - ``geometric_type_filter`` (``type_pattern`` seul) — maquettes **sans
+      calque**, typiquement un export Revit. Les murs extérieurs sont trouvés
+      géométriquement, puis ``type_pattern`` désigne la couche qui représente la
+      façade : sans lui, une façade modélisée en murs superposés (structure,
+      isolant, peau) serait comptée trois ou quatre fois ;
+    - ``geometric`` (défaut, aucun motif) — murs marqués extérieurs, sans
+      hypothèse de convention. Conservé tel quel.
+
+    ``ratio_fac_shab`` a une définition **unique** dans les trois modes :
+    ``superficie_facades_nette_m2 / shab_m2``, celle que le livrable Excel
+    calcule. Elle exclut les menuiseries — deux définitions concurrentes du même
+    indicateur ont déjà circulé (0,92 dans le classeur, 1,05 dans le contrat).
 
     Les motifs employés sont **explicites** (aucune valeur codée en dur pour un
-    projet donné) et repris dans ``diagnostics.filters``.
+    projet donné) et repris dans ``diagnostics.filters``, avec les types retenus
+    et rejetés : la sélection est rejouable à partir du seul contrat.
 
     Le document est **construit directement au format V1** : il n'est jamais
     assemblé à plat puis migré.
     """
-    if layer_pattern:
+    mode = resolve_filter_mode(filter_mode, layer_pattern, type_pattern)
+    if mode == "layer_type_filter":
         return _run_i3f(
             model,
             file_name,
             seuil_3f=seuil_3f,
             layer_pattern=layer_pattern,
+            type_pattern=type_pattern,
+        )
+    if mode == "geometric_type_filter":
+        return _run_geometric_type_filter(
+            model,
+            file_name,
+            seuil_3f=seuil_3f,
             type_pattern=type_pattern,
         )
 
@@ -476,7 +623,8 @@ def run(
     facade_net = fac["facade_net"]
     facade_gross = round(facade_net + men["total"], 2)
     shab, n_shab = _shab(model)
-    ratio = (facade_gross / shab) if shab else None
+    # Ratio unique : surface NETTE d'enveloppe / SHAB, menuiseries exclues.
+    ratio = (facade_net / shab) if shab else None
 
     return {
         "schema": SCHEMA_ENVELOPE_QUANTITIES_V1,
@@ -501,6 +649,13 @@ def run(
         "hors_filtre_type": fac["hors_filtre_type"],
         # Hors total métier, par construction : compteurs et détails d'appui.
         "diagnostics": {
+            "filters": _filters_trace(
+                mode="geometric",
+                layer_pattern=None,
+                type_pattern=None,
+                par_type=fac["par_type"],
+                hors_filtre_type=fac["hors_filtre_type"],
+            ),
             "counts": {
                 "n_murs_exterieurs": fac["n_ext"],
                 "n_facades_fallback_geom": fac["n_geom_fallback"],
@@ -509,6 +664,102 @@ def run(
                 "n_menuiseries": men["n"],
                 "n_pieces_shab": n_shab,
             },
+            "menuiseries_detail": men["detail"],
+        },
+    }
+
+
+def _filters_trace(
+    *,
+    mode: str,
+    layer_pattern: str | None,
+    type_pattern: str | None,
+    par_type: list[dict],
+    hors_filtre_type: list[dict],
+) -> dict:
+    """Trace du filtre appliqué, pour rejouer la sélection depuis le contrat.
+
+    Le mode et les motifs seuls ne suffisent pas à relire un résultat : il faut
+    voir **ce qu'ils ont produit**. On expose donc aussi les types retenus et
+    les types rejetés — c'est ce qui permet de constater qu'une couche de façade
+    manque, ou qu'un doublage a été compté, sans rouvrir l'IFC.
+    """
+    return {
+        "mode": mode,
+        "layer_pattern": layer_pattern,
+        "type_pattern": type_pattern,
+        "types_retenus": sorted(r["type"] for r in par_type),
+        "types_rejetes": sorted(r["type"] for r in hors_filtre_type),
+    }
+
+
+def _run_geometric_type_filter(
+    model,
+    file_name: str,
+    *,
+    seuil_3f: float | None,
+    type_pattern: str,
+) -> dict:
+    """Mode « murs extérieurs géométriques + filtre de type ». Voir :func:`run`."""
+    type_re = re.compile(type_pattern, re.I)
+
+    fac = _facades_by_geometric_type(model, type_re)
+    # Menuiseries portées par les murs RETENUS, comme en mode I3F : compter
+    # celles de toute la maquette rapporterait des baies de murs écartés.
+    men = _menuiseries_of_walls(model, fac["wall_types"])
+    shab, n_shab, shab_exclu = _shab_zoned(model)
+    facade_net = fac["facade_net"]
+    ratio = (facade_net / shab) if shab else None
+
+    openings = men["par_type"]
+    for row in fac["par_type"]:
+        row["menuiseries_m2"] = round(openings.get(row["type"], 0.0), 2)
+
+    return {
+        "schema": SCHEMA_ENVELOPE_QUANTITIES_V1,
+        "source": contract_source("extract_envelope_surfaces", file_name),
+        "created_at": utc_now_iso(),
+        "summary": {
+            # Total métier = NetSideArea des types RETENUS, menuiseries exclues.
+            "superficie_facades_m2": facade_net,
+            "superficie_facades_nette_m2": facade_net,
+            # Murs extérieurs AVANT filtre de type : sur une maquette multicouche
+            # cette valeur compte plusieurs fois la même façade. Diagnostic seul.
+            "superficie_calque_total_m2": fac["calque_total"],
+            "superficie_menuiseries_m2": round(men["total"], 2),
+            "superficie_menuiseries_fenetres_m2": round(men["fenetres"], 2),
+            "superficie_menuiseries_portes_m2": round(men["portes"], 2),
+            "shab_m2": round(shab, 2),
+            "ratio_fac_shab": round(ratio, 4) if ratio is not None else None,
+            "seuil_i3f": seuil_3f,
+            "conforme_seuil": (
+                bool(ratio <= seuil_3f) if (ratio is not None and seuil_3f) else None
+            ),
+            "methode_facade": fac["method"],
+        },
+        "par_type": fac["par_type"],
+        "hors_filtre_type": fac["hors_filtre_type"],
+        "diagnostics": {
+            "filters": _filters_trace(
+                mode=fac["method"],
+                layer_pattern=None,
+                type_pattern=type_pattern,
+                par_type=fac["par_type"],
+                hors_filtre_type=fac["hors_filtre_type"],
+            ),
+            "counts": {
+                "n_murs_exterieurs": fac["n_murs_exterieurs"],
+                "n_murs_retenus": fac["n_ext"],
+                "n_facades_fallback_geom": fac["n_geom_fallback"],
+                "n_types_facade": len(fac["par_type"]),
+                "n_types_hors_filtre": len(fac["hors_filtre_type"]),
+                "n_menuiseries": men["n"],
+                "n_pieces_shab": n_shab,
+            },
+            "methode_exterieur": fac["method_exterieur"],
+            "shab_types_exclus": sorted(_SHAB_EXCLUDE_I3F_TYPES)
+            + [_SHAB_EXCLUDE_I3F_RAW.pattern],
+            "shab_exclusions_m2": round(shab_exclu, 2),
             "menuiseries_detail": men["detail"],
         },
     }
@@ -563,7 +814,13 @@ def _run_i3f(
         "hors_filtre_type": fac["hors_filtre_type"],
         "diagnostics": {
             # Motifs employés : la sélection est reproductible et auditable.
-            "filters": {"layer_pattern": layer_pattern, "type_pattern": type_pattern},
+            "filters": _filters_trace(
+                mode=fac["method"],
+                layer_pattern=layer_pattern,
+                type_pattern=type_pattern,
+                par_type=fac["par_type"],
+                hors_filtre_type=fac["hors_filtre_type"],
+            ),
             "counts": {
                 "n_murs_calque": fac["n_murs_calque"],
                 "n_murs_sans_calque": fac["n_murs_sans_calque"],

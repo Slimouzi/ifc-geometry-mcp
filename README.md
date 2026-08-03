@@ -123,39 +123,72 @@ Les cinq JSON de findings préliminaires (`*_space_inventory.json`,
 `*_openings_check.json`) ne sont **pas encore** contractualisés : leur forme
 reste verrouillée par `tests/test_contract.py`.
 
-## Sélection de l'enveloppe : calque + type
+## Sélection de l'enveloppe : trois modes
 
-`extract_envelope_surfaces` propose deux modes de sélection des murs.
+`extract_envelope_surfaces` propose trois modes de sélection des murs. Le mode
+est déduit des motifs fournis, ou imposé par `filter_mode`.
 
 | Mode | Déclenchement | Sélection | Total façade |
 |---|---|---|---|
-| **Calque + type** (I3F) | `layer_pattern` fourni | murs du calque, filtrés par `type_pattern` | `NetSideArea` des types retenus, menuiseries **exclues** |
-| **Géométrique** (défaut) | aucun paramètre | murs marqués extérieurs (limites d'espace ou `IsExternal`) | murs extérieurs, menuiseries **incluses** |
+| `layer_type_filter` (ArchiCAD) | `layer_pattern` fourni | murs du calque, filtrés par `type_pattern` | `NetSideArea` des types retenus, menuiseries **exclues** |
+| `geometric_type_filter` (Revit) | `type_pattern` **seul** | murs extérieurs géométriques, filtrés par `type_pattern` | `NetSideArea` des types retenus, menuiseries **exclues** |
+| `geometric` (défaut) | aucun motif | murs marqués extérieurs (limites d'espace ou `IsExternal`) | murs extérieurs, menuiseries **incluses** |
 
-Sur une maquette ArchiCAD, le mode géométrique ne reproduit pas la
+Sur une maquette **ArchiCAD**, le mode géométrique ne reproduit pas la
 décomposition MOA : le calque est ce qui délimite réellement l'enveloppe, et il
 faut encore écarter les habillages (zinc, alu, bois, couvertines) qu'il
-contient. D'où les deux motifs, **explicites** — aucune valeur n'est codée en
-dur pour un projet :
+contient.
+
+Sur une maquette **Revit**, le problème est inverse : il n'y a aucun calque, et
+chaque façade est modélisée en **murs superposés** — structure porteuse,
+doublage isolant, peau extérieure. Sommer les murs extérieurs compte alors la
+même façade trois ou quatre fois : sur un cas réel, 9 030 m² de façade pour
+2 392 m² de SHAB, soit un ratio de 3,77 physiquement absurde. `type_pattern`
+désigne la couche qui représente la façade et ramène le total à 2 206 m²
+(ratio 0,92).
+
+Les motifs sont **explicites** — aucune valeur n'est codée en dur pour un
+projet donné :
 
 ```python
+# ArchiCAD : le calque délimite, le type écarte les habillages.
 extract_envelope_surfaces(
     "modele.ifc",
     seuil_3f=0.9,
     layer_pattern=r"221|ext[ée]rieurs?\s+p[ée]riph[ée]riques",
     type_pattern=r"^ME[ _]",
 )
+
+# Revit : pas de calque, le type désigne la peau extérieure.
+extract_envelope_surfaces(
+    "modele.ifc",
+    type_pattern=r"MUR ENDUIT|BARDAGE BOIS|ZINC|VERRE REGLIT",
+    filter_mode="geometric_type_filter",  # facultatif : déduit du motif
+)
 ```
 
-Les motifs employés sont repris dans `diagnostics.filters` du JSON produit : la
-sélection reste auditable et reproductible.
+`filter_mode` **impose** le mode au lieu de le déduire. Un mode demandé dont le
+motif manque est une erreur, jamais une dégradation silencieuse : se rabattre
+sur une autre sélection changerait la nature du total sans que rien ne le dise.
 
-**Nom de type métier.** Il vient du **type IFC** (`IfcWallType.Name`), résolu
-via `ifcopenshell.util.element.get_type` — et non de `IsTypedBy`, qui n'existe
-qu'en IFC4 alors que les maquettes ArchiCAD I3F sont en IFC2X3. `ObjectType` et
-`Name` servent de repli ; `PredefinedType` n'est qu'un dernier recours, car il
-vaut `ELEMENTEDWALL` pour tous les murs ArchiCAD et écraserait la décomposition
-métier en un type unique.
+Le filtre appliqué est tracé dans `diagnostics.filters` du JSON produit — mode,
+motifs, **types retenus et types rejetés**. Le résultat est donc rejouable à
+partir des seuls paramètres, sans retouche du contrat après génération.
+
+**Ratio FAC/SHAB.** Définition **unique** dans les trois modes :
+`superficie_facades_nette_m2 / shab_m2`, menuiseries exclues — celle que le
+livrable Excel calcule. Deux définitions concurrentes du même indicateur ont
+circulé (0,92 dans le classeur, 1,05 dans le contrat) ; il n'en reste qu'une.
+
+**Nom de type métier.** Résolu dans cet ordre : **type IFC**
+(`IfcWallType.Name` via `IfcRelDefinesByType`, atteint par
+`ifcopenshell.util.element.get_type` — et non `IsTypedBy`, qui n'existe qu'en
+IFC4 alors que les maquettes I3F sont en IFC2X3), puis `ObjectType`, puis
+`PredefinedType`. Ce dernier n'est qu'un recours ultime : il vaut
+`ELEMENTEDWALL` pour tous les murs ArchiCAD et écraserait la décomposition
+métier en un type unique. Le `Name` d'**instance** n'intervient qu'en tout
+dernier : sur Revit il porte l'identifiant de l'élément
+(`Mur de base:MUR ENDUIT 20 mm:3566323`) et ferait un type distinct par mur.
 
 **SHAB.** En mode calque, seules les pièces **rattachées à une zone** comptent,
 hors annexes non habitables (cellier, cave, balcon, garage, escalier, local) —
