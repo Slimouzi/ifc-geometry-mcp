@@ -200,9 +200,24 @@ métier en un type unique. Le `Name` d'**instance** n'intervient qu'en tout
 dernier : sur Revit il porte l'identifiant de l'élément
 (`Mur de base:MUR ENDUIT 20 mm:3566323`) et ferait un type distinct par mur.
 
-**SHAB.** En mode calque, seules les pièces **rattachées à une zone** comptent,
-hors annexes non habitables (cellier, cave, balcon, garage, escalier, local) —
-les exclusions appliquées sont listées dans `diagnostics.shab_types_exclus`.
+**SHAB.** Une seule définition dans les **trois** modes : seules les pièces
+**rattachées à une zone** comptent — donc à un logement — hors annexes non
+habitables (cellier, cave, balcon, garage, escalier, local). Les exclusions
+appliquées sont listées dans `diagnostics.shab_types_exclus`.
+
+`summary.methode_shab` déclare la méthode employée, au même titre que
+`methode_facade`. Le ratio a une formule unique, mais comparer deux ratios
+suppose des dénominateurs de même nature : le mode géométrique comptait
+auparavant **toutes** les pièces, y compris hors logement, et son ratio n'était
+donc pas comparable à celui des modes filtrés.
+
+Sur une maquette **sans aucune `IfcZone`**, le zonage n'est pas une donnée
+manquante mais une convention absente : le calcul se replie sur toutes les
+pièces hors annexes et le déclare
+(`methode_shab: "toutes_pieces_hors_annexes_sans_zonage"`). En revanche, si des
+zones existent mais qu'aucune pièce n'y est rattachée, la SHAB vaut **0** et le
+ratio devient nul — c'est un défaut de modélisation réel, qu'un repli
+masquerait sous un chiffre d'apparence normale.
 
 ## Détails géométriques
 
