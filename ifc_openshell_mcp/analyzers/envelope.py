@@ -548,12 +548,20 @@ def resolve_filter_mode(
             "``filter_mode='layer_type_filter'`` exige ``layer_pattern`` : c'est "
             "le calque qui délimite l'enveloppe dans ce mode."
         )
-    if mode == "geometric_type_filter" and not type_pattern:
-        raise EnvelopeFilterModeError(
-            "``filter_mode='geometric_type_filter'`` exige ``type_pattern`` : sans "
-            "lui, la sélection retiendrait tous les murs extérieurs et compterait "
-            "plusieurs fois la même façade sur une maquette multicouche."
-        )
+    if mode == "geometric_type_filter":
+        if not type_pattern:
+            raise EnvelopeFilterModeError(
+                "``filter_mode='geometric_type_filter'`` exige ``type_pattern`` : sans "
+                "lui, la sélection retiendrait tous les murs extérieurs et compterait "
+                "plusieurs fois la même façade sur une maquette multicouche."
+            )
+        if layer_pattern:
+            raise EnvelopeFilterModeError(
+                "``filter_mode='geometric_type_filter'`` n'emploie pas de calque : "
+                "``layer_pattern`` serait accepté puis ignoré, et la sélection ne "
+                "serait pas celle que l'appelant croit avoir demandée. Retirer "
+                "``layer_pattern``, ou choisir ``layer_type_filter``."
+            )
     if mode == "geometric" and (layer_pattern or type_pattern):
         raise EnvelopeFilterModeError(
             "``filter_mode='geometric'`` n'applique aucun motif : "
@@ -704,16 +712,35 @@ def _run_geometric_type_filter(
     type_re = re.compile(type_pattern, re.I)
 
     fac = _facades_by_geometric_type(model, type_re)
-    # Menuiseries portées par les murs RETENUS, comme en mode I3F : compter
-    # celles de toute la maquette rapporterait des baies de murs écartés.
+    # Menuiseries portées par les murs EXTÉRIEURS, avant filtre de type — et non
+    # par les seuls types retenus.
+    #
+    # Ce n'est pas une inattention : dans une façade Revit multicouche, la baie
+    # est portée par le mur PORTEUR (béton, ossature), pas par la peau
+    # extérieure, qui est une couche non porteuse. Mesuré sur la maquette réelle
+    # DIEPPE-7427L : 108 menuiseries / 375,89 m² sur les 404 murs extérieurs, et
+    # **zéro** sur les 128 murs des types retenus. Restreindre aux types retenus
+    # annulerait donc le total des menuiseries sur les maquettes mêmes pour
+    # lesquelles ce mode existe.
+    #
+    # Conséquence assumée et tracée plus bas : la ventilation par type
+    # (``menuiseries_m2``) peut être nulle sur toutes les lignes alors que le
+    # total ne l'est pas — les baies sont hébergées par des types écartés.
     men = _menuiseries_of_walls(model, fac["wall_types"])
     shab, n_shab, shab_exclu = _shab_zoned(model)
     facade_net = fac["facade_net"]
     ratio = (facade_net / shab) if shab else None
 
     openings = men["par_type"]
+    types_retenus = {r["type"] for r in fac["par_type"]}
     for row in fac["par_type"]:
         row["menuiseries_m2"] = round(openings.get(row["type"], 0.0), 2)
+    # Part des menuiseries hébergée par un type ÉCARTÉ. Sans ce chiffre, un
+    # lecteur verrait une ventilation par type intégralement nulle face à un
+    # total non nul, et conclurait à un bug plutôt qu'à un choix de modélisation.
+    men_hors_types_retenus = round(
+        sum(a for t, a in openings.items() if t not in types_retenus), 2
+    )
 
     return {
         "schema": SCHEMA_ENVELOPE_QUANTITIES_V1,
@@ -756,6 +783,11 @@ def _run_geometric_type_filter(
                 "n_menuiseries": men["n"],
                 "n_pieces_shab": n_shab,
             },
+            # Périmètre des menuiseries : murs extérieurs AVANT filtre de type.
+            # En façade multicouche la baie est portée par le mur porteur, pas
+            # par la peau — restreindre aux types retenus rendrait un total nul.
+            "menuiseries_perimetre": "murs_exterieurs_avant_filtre_type",
+            "menuiseries_m2_sur_types_rejetes": men_hors_types_retenus,
             "methode_exterieur": fac["method_exterieur"],
             "shab_types_exclus": sorted(_SHAB_EXCLUDE_I3F_TYPES)
             + [_SHAB_EXCLUDE_I3F_RAW.pattern],

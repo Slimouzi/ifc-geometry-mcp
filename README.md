@@ -175,6 +175,16 @@ Le filtre appliqué est tracé dans `diagnostics.filters` du JSON produit — mo
 motifs, **types retenus et types rejetés**. Le résultat est donc rejouable à
 partir des seuls paramètres, sans retouche du contrat après génération.
 
+**Menuiseries en mode `geometric_type_filter`.** Elles sont comptées sur les
+murs extérieurs **avant** le filtre de type, et non sur les seuls types retenus.
+Ce n'est pas un oubli : dans une façade Revit multicouche, la baie est portée par
+le mur **porteur** (béton, ossature), pas par la peau extérieure, qui est une
+couche non porteuse. Mesuré sur une maquette réelle : 108 menuiseries / 375,89 m²
+sur les 404 murs extérieurs, et **zéro** sur les 128 murs des types retenus.
+Conséquence assumée : la ventilation par type (`menuiseries_m2`) peut être nulle
+sur toutes les lignes alors que le total ne l'est pas — le contrat expose alors
+`diagnostics.menuiseries_m2_sur_types_rejetes` pour que l'écart s'explique.
+
 **Ratio FAC/SHAB.** Définition **unique** dans les trois modes :
 `superficie_facades_nette_m2 / shab_m2`, menuiseries exclues — celle que le
 livrable Excel calcule. Deux définitions concurrentes du même indicateur ont

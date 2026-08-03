@@ -63,6 +63,11 @@ TOTAL_BRUT = round(TOTAL_PEAUX + sum(a for _, _, a in COUCHES_INTERNES), 2)  # 9
 SHAB = 2392.64
 RATIO_ATTENDU = round(TOTAL_PEAUX / SHAB, 4)  # 0.9221
 
+# Les baies sont portées par le mur PORTEUR — type écarté par le filtre.
+TYPE_PORTEUR = "Mur de base:BETON 200mm"
+N_FENETRES = 12
+SURFACE_MENUISERIES = round(N_FENETRES * 1.2 * 1.5, 2)  # 21.6
+
 
 def _model():
     """Maquette Revit synthétique : pas de calque, type porté par IfcWallType."""
@@ -78,6 +83,8 @@ def _model():
     ifcopenshell.api.aggregate.assign_object(f, products=[site], relating_object=proj)
     ifcopenshell.api.aggregate.assign_object(f, products=[bld], relating_object=site)
     ifcopenshell.api.aggregate.assign_object(f, products=[storey], relating_object=bld)
+
+    murs_par_type: dict[str, list] = {}
 
     def add_walls(type_name, count, total_area):
         wtype = ifcopenshell.api.root.create_entity(
@@ -114,9 +121,34 @@ def _model():
                 ),
                 properties={"NetSideArea": float(each)},
             )
+            murs_par_type.setdefault(type_name, []).append(w)
 
     for name, n, area in PEAUX + COUCHES_INTERNES:
         add_walls(name, n, area)
+
+    # Baies portées par le mur PORTEUR, pas par la peau extérieure — c'est la
+    # réalité d'une façade Revit multicouche, et ce qui rend impossible de
+    # restreindre le comptage des menuiseries aux seuls types retenus.
+    for hote in murs_par_type[TYPE_PORTEUR][:N_FENETRES]:
+        ouverture = ifcopenshell.api.root.create_entity(
+            f, ifc_class="IfcOpeningElement", name="Baie"
+        )
+        f.create_entity(
+            "IfcRelVoidsElement",
+            GlobalId=ifcopenshell.guid.new(),
+            RelatingBuildingElement=hote,
+            RelatedOpeningElement=ouverture,
+        )
+        fen = ifcopenshell.api.root.create_entity(
+            f, ifc_class="IfcWindow", name="F 120x150"
+        )
+        fen.OverallWidth, fen.OverallHeight = 1.2, 1.5
+        f.create_entity(
+            "IfcRelFillsElement",
+            GlobalId=ifcopenshell.guid.new(),
+            RelatingOpeningElement=ouverture,
+            RelatedBuildingElement=fen,
+        )
     # Cloison intérieure : jamais retenue, par aucun mode.
     cloison = ifcopenshell.api.root.create_entity(
         f, ifc_class="IfcWallType", name="Mur de base:Intérieur - Cloison 50 mm"
@@ -243,6 +275,42 @@ def test_interior_partitions_are_out_of_scope_entirely(payload):
     assert not any("Cloison" in t for t in tous), tous
 
 
+# ── menuiseries : périmètre AVANT filtre de type, et c'est voulu ───────
+
+
+def test_menuiseries_come_from_external_walls_before_the_type_filter(payload):
+    """Restreindre aux types retenus rendrait un total NUL.
+
+    En façade Revit multicouche, la baie est portée par le mur **porteur**
+    (béton, ossature), pas par la peau extérieure qui est une couche non
+    porteuse. Mesuré sur la maquette réelle DIEPPE-7427L : 108 menuiseries /
+    375,89 m² sur les 404 murs extérieurs, et **zéro** sur les 128 murs des
+    types retenus. Le périmètre « murs extérieurs avant filtre » n'est donc pas
+    un oubli — c'est la seule définition qui produise un total non vide sur les
+    maquettes visées par ce mode.
+    """
+    assert payload["summary"]["superficie_menuiseries_m2"] == pytest.approx(
+        SURFACE_MENUISERIES, abs=0.05
+    )
+    assert payload["diagnostics"]["counts"]["n_menuiseries"] == N_FENETRES
+    assert (
+        payload["diagnostics"]["menuiseries_perimetre"]
+        == "murs_exterieurs_avant_filtre_type"
+    )
+
+
+def test_openings_hosted_by_rejected_types_are_reported_not_hidden(payload):
+    """Une ventilation par type nulle face à un total non nul doit s'expliquer.
+
+    Sans ce diagnostic, le lecteur du contrat conclurait à un bug plutôt qu'à un
+    choix de modélisation.
+    """
+    assert all(r["menuiseries_m2"] == 0.0 for r in payload["par_type"])
+    assert payload["diagnostics"]["menuiseries_m2_sur_types_rejetes"] == pytest.approx(
+        SURFACE_MENUISERIES, abs=0.05
+    )
+
+
 # ── traçabilité : le contrat suffit à relire la sélection ──────────────
 
 
@@ -301,6 +369,22 @@ def test_layer_mode_without_layer_pattern_is_an_error(modele):
             file_name="s.ifc",
             type_pattern=TYPE_PATTERN_DIEPPE,
             filter_mode="layer_type_filter",
+        )
+
+
+def test_geometric_type_filter_refuses_a_layer_pattern(modele):
+    """Il n'emploie pas de calque : l'accepter reviendrait à l'ignorer.
+
+    L'appelant croirait avoir demandé une sélection par calque et lirait un total
+    obtenu autrement.
+    """
+    with pytest.raises(envelope.EnvelopeFilterModeError, match="layer_pattern"):
+        envelope.run(
+            modele,
+            file_name="s.ifc",
+            type_pattern=TYPE_PATTERN_DIEPPE,
+            layer_pattern=r"221",
+            filter_mode="geometric_type_filter",
         )
 
 
