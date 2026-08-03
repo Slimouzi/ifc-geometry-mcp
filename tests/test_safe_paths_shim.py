@@ -1,8 +1,8 @@
-"""Parité du shim safe_paths (profil ifc de bim-sandbox). Offline, fs tmp."""
+"""Parité du shim safe_paths (profil ifc de bim_core.paths). Offline, fs tmp."""
 
 from __future__ import annotations
 
-import bim_sandbox
+import bim_core.paths as core_paths
 import pytest
 
 from ifc_openshell_mcp import safe_paths as sp
@@ -15,7 +15,7 @@ def _mk(p, content=b"x"):
 
 
 def test_output_path_is_direct_reexport():
-    assert sp.safe_output_path is bim_sandbox.safe_output_path
+    assert sp.safe_output_path is core_paths.safe_output_path
 
 
 def test_input_path_ifc_profile_relative_under_root(tmp_path, monkeypatch):
@@ -25,7 +25,7 @@ def test_input_path_ifc_profile_relative_under_root(tmp_path, monkeypatch):
     got = sp.safe_input_path("model.ifc")
     assert got == (tmp_path / "model.ifc").resolve()
     # Parité stricte avec le profil ifc du package.
-    assert got == bim_sandbox.safe_input_path("model.ifc", profile="ifc")
+    assert got == core_paths.safe_input_path("model.ifc", profile="ifc")
 
 
 def test_input_path_no_default_extension_whitelist(tmp_path, monkeypatch):
