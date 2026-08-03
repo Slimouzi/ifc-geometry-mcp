@@ -7,8 +7,13 @@ Calcule, pour alimenter l'annexe I3F « Extraction surface enveloppe » :
   plan de façade) → aire de façade *brute*.
 - **Superficie des menuiseries** : aire des IfcWindow + IfcDoor extérieures
   (largeur × hauteur d'emprise).
-- **SHAB** : surface habitable = somme des surfaces nettes des pièces, hors
-  annexes (cave, cellier, parking, local technique, extérieur).
+- **SHAB** : surface habitable — pièces **rattachées à une zone** (donc à un
+  logement), hors annexes non habitables (cave, cellier, balcon, garage,
+  escalier, local technique). Une seule définition dans les trois modes de
+  sélection ; ``summary.methode_shab`` la déclare. Repli explicite et tracé
+  (``toutes_pieces_hors_annexes_sans_zonage``) sur les maquettes sans aucune
+  ``IfcZone``, où le zonage n'est pas une donnée manquante mais une convention
+  absente.
 - **ratio FAC/SHAB** : compacité de l'enveloppe. Définition **unique** dans tous
   les modes — ``superficie_facades_nette_m2 / shab_m2``, menuiseries **exclues**,
   celle que le livrable Excel calcule. Deux définitions concurrentes du même
@@ -501,8 +506,46 @@ def _menuiseries(model) -> dict:
     }
 
 
+#: Méthodes de calcul de la SHAB, exposées dans ``summary.methode_shab`` au même
+#: titre que ``methode_facade``. Le ratio FAC/SHAB a une formule unique, mais
+#: comparer deux ratios n'a de sens que si leur dénominateur est de même nature.
+METHODE_SHAB_ZONES = "pieces_zonees_hors_annexes"
+METHODE_SHAB_SANS_ZONAGE = "toutes_pieces_hors_annexes_sans_zonage"
+
+
+def _shab_unifiee(model) -> tuple[float, int, float, str]:
+    """SHAB **I3F** — pièces rattachées à une zone, hors annexes non habitables.
+
+    Une seule définition pour les trois modes de sélection d'enveloppe. Avant,
+    les modes filtrés employaient :func:`_shab_zoned` et le mode géométrique
+    :func:`_shab` : le ratio FAC/SHAB avait bien une formule unique, mais son
+    **dénominateur** changeait de nature selon le mode. Deux ratios pouvaient
+    donc différer sans que rien ne le signale — un écart de formule se voit à la
+    relecture, un écart de contenu non.
+
+    Le zonage est ce qui distingue la surface *habitable* de la simple somme des
+    pièces : une pièce hors zone n'appartient à aucun logement. Repli **explicite
+    et tracé** quand la maquette ne porte aucune ``IfcZone`` — le zonage n'y est
+    alors pas une donnée manquante mais une convention absente, et refuser tout
+    ratio priverait ces maquettes d'un indicateur utile.
+
+    Si des zones existent mais qu'aucune pièce n'y est rattachée, on **ne se
+    replie pas** : la SHAB vaut 0 et le ratio devient nul. C'est un défaut de
+    modélisation réel, que le repli masquerait.
+    """
+    total, n, exclu = _shab_zoned(model)
+    if model.by_type("IfcZone"):
+        return total, n, exclu, METHODE_SHAB_ZONES
+    total, n = _shab(model)
+    return total, n, 0.0, METHODE_SHAB_SANS_ZONAGE
+
+
 def _shab(model) -> tuple[float, int]:
-    """SHAB via NetFloorArea déclarée (Qto), hors annexes. Aucune géométrie."""
+    """SHAB via NetFloorArea déclarée (Qto), hors annexes. Aucune géométrie.
+
+    Repli de :func:`_shab_unifiee` pour les maquettes **sans aucun zonage** ;
+    n'est plus appelée directement par les modes de sélection.
+    """
     total = 0.0
     n = 0
     for sp in model.by_type("IfcSpace"):
@@ -630,7 +673,7 @@ def run(
     men = _menuiseries(model)
     facade_net = fac["facade_net"]
     facade_gross = round(facade_net + men["total"], 2)
-    shab, n_shab = _shab(model)
+    shab, n_shab, _shab_exclu, methode_shab = _shab_unifiee(model)
     # Ratio unique : surface NETTE d'enveloppe / SHAB, menuiseries exclues.
     ratio = (facade_net / shab) if shab else None
 
@@ -651,6 +694,9 @@ def run(
             "ratio_fac_shab": round(ratio, 3) if ratio is not None else None,
             "seuil_i3f": seuil_3f,
             "methode_facade": fac["method"],
+            # Nature du DÉNOMINATEUR du ratio. La formule est unique, mais
+            # comparer deux ratios suppose des SHAB de même nature.
+            "methode_shab": methode_shab,
         },
         # Décomposition métier (colonnes MOA) vs diagnostic (hors filtre).
         "par_type": fac["par_type"],
@@ -727,7 +773,7 @@ def _run_geometric_type_filter(
     # (``menuiseries_m2``) peut être nulle sur toutes les lignes alors que le
     # total ne l'est pas — les baies sont hébergées par des types écartés.
     men = _menuiseries_of_walls(model, fac["wall_types"])
-    shab, n_shab, shab_exclu = _shab_zoned(model)
+    shab, n_shab, shab_exclu, methode_shab = _shab_unifiee(model)
     facade_net = fac["facade_net"]
     ratio = (facade_net / shab) if shab else None
 
@@ -763,6 +809,9 @@ def _run_geometric_type_filter(
                 bool(ratio <= seuil_3f) if (ratio is not None and seuil_3f) else None
             ),
             "methode_facade": fac["method"],
+            # Nature du DÉNOMINATEUR du ratio. La formule est unique, mais
+            # comparer deux ratios suppose des SHAB de même nature.
+            "methode_shab": methode_shab,
         },
         "par_type": fac["par_type"],
         "hors_filtre_type": fac["hors_filtre_type"],
@@ -811,7 +860,7 @@ def _run_i3f(
 
     fac = _facades_by_layer(model, layer_re, type_re)
     men = _menuiseries_of_walls(model, fac["wall_types"])
-    shab, n_shab, shab_exclu = _shab_zoned(model)
+    shab, n_shab, shab_exclu, methode_shab = _shab_unifiee(model)
     facade_net = fac["facade_net"]
     ratio = (facade_net / shab) if shab else None
 
@@ -841,6 +890,9 @@ def _run_i3f(
                 bool(ratio <= seuil_3f) if (ratio is not None and seuil_3f) else None
             ),
             "methode_facade": fac["method"],
+            # Nature du DÉNOMINATEUR du ratio. La formule est unique, mais
+            # comparer deux ratios suppose des SHAB de même nature.
+            "methode_shab": methode_shab,
         },
         "par_type": fac["par_type"],
         "hors_filtre_type": fac["hors_filtre_type"],
