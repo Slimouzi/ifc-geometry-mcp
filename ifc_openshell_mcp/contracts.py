@@ -12,6 +12,7 @@ from typing import Any
 from bim_core.contracts import (
     parse_computed_base_quantities,
     parse_envelope_quantities,
+    parse_spatial_evidence,
     utc_now_iso,
 )
 
@@ -49,10 +50,20 @@ def validate_emitted_quantities(payload: dict[str, Any]) -> None:
     )
 
 
+def validate_emitted_spatial_evidence(payload: dict[str, Any]) -> None:
+    """Idem pour ``spatial_evidence/v1``.
+
+    Pas de paramètre ``strict`` : ce contrat n'a pas de forme legacy, un payload
+    sans ``schema`` y est refusé quel que soit le mode.
+    """
+    parse_spatial_evidence(payload, origin="sortie extract_spatial_evidence")
+
+
 __all__ = [
     "PRODUCER",
     "contract_source",
     "utc_now_iso",
     "validate_emitted_envelope",
     "validate_emitted_quantities",
+    "validate_emitted_spatial_evidence",
 ]

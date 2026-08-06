@@ -28,8 +28,8 @@ cd ifc-geometry-mcp
 python -m venv .venv && source .venv/bin/activate
 # bim-core (contrats JSON versionnés + sandbox de chemins) n'est PAS publié
 # sur PyPI : on l'installe d'abord depuis son tag Git, sinon la résolution de
-# la dépendance ``bim-core>=0.3.0,<0.4`` échoue.
-pip install "git+https://github.com/Slimouzi/bim-core.git@bim-core-v0.3.0"
+# la dépendance ``bim-core>=0.4.0,<0.5`` échoue.
+pip install "git+https://github.com/Slimouzi/bim-core.git@bim-core-v0.4.0"
 pip install -e .
 ```
 
@@ -89,13 +89,14 @@ Les 5 outils sont **indépendants** et peuvent tourner en parallèle. Voir
 
 ## Contrats JSON émis
 
-Deux sorties sont des **contrats versionnés** définis dans
+Trois sorties sont des **contrats versionnés** définis dans
 [`bim-core`](https://github.com/Slimouzi/bim-core) (`bim_core.contracts`) :
 
 | Outil | Fichier | Schéma |
 |---|---|---|
 | `extract_envelope_surfaces` | `<stem>_envelope.json` | `envelope_quantities/v1` |
 | `export_computed_base_quantities` | `<stem>_computed_quantities.json` | `computed_base_quantities/v1` |
+| `extract_spatial_evidence` | `<stem>_spatial_evidence.json` | `spatial_evidence/v1` |
 
 **Ce sont les sorties officielles du serveur.** Ce MCP *calcule* ; la mise en
 forme client (XLSX, DOCX, PDF) relève d'`audit-bim-i3f`, qui consomme ces JSON.
@@ -115,6 +116,39 @@ conforme fait échouer l'outil au lieu de produire un fichier douteux.
 Ce sont des documents **V1 d'origine**, jamais des payloads historiques migrés :
 ils sont acceptés par bim-core sans avertissement de compat et passent le mode
 strict `BIM_CORE_JSON_STRICT_SCHEMA=true` (test `tests/test_emitted_contracts.py`).
+
+### `spatial_evidence/v1` — preuves géométriques neutres
+
+Socle destiné aux profils AMO qui doivent trancher des contrôles de dimension,
+de contenance et d'encombrement plutôt que des propriétés IFC. Le document ne
+porte **aucun seuil et aucun verdict** : un seuil appartient au maître d'ouvrage
+qui l'écrit, une mesure appartient à la maquette.
+
+Ce que le contrat impose de dire honnêtement :
+
+- **Il n'existe pas de champ « largeur ».** Deux approximations nommées par leur
+  méthode, `min_rect_width_m` (petit côté du rectangle englobant orienté) et
+  `inscribed_diameter_m` (plus grand cercle inscrit). Elles coïncident et valent
+  la largeur sur une pièce **convexe**. Sur un L à branches de 2,00 m elles
+  rendent 6,00 et 2,34 : **aucune des deux n'est la largeur du passage le plus
+  étroit**. Trancher un contrôle de largeur de circulation sur forme quelconque
+  demande un axe médian, absent de ce lot.
+- **Le rattachement objet → espace porte sa méthode** — `ifc_declared` (lu dans
+  le fichier), `centroid_in_footprint` ou `footprint_overlap` (déduits). Un
+  consommateur exigeant peut refuser les deux derniers.
+- **Ce qui n'a pas été mesuré est compté, pas supprimé.** `geometry_status`
+  distingue `no_representation` (lacune de maquette) de `shape_failed` (forme
+  déléguée à des sous-éléments écartés par la sélection — conséquence du
+  périmètre, pas défaut du fichier) et de `degenerate` (boîte englobante
+  disponible, empreinte non : le cas de toutes les menuiseries).
+
+Sélection par **exclusion** (`selection.excluded_classes`), jamais par liste
+blanche : une classe oubliée dans une liste blanche disparaîtrait sans bruit et
+le consommateur conclurait à une absence.
+
+Relevé sur la maquette de référence (10 524 produits, 3 362 retenus, ~18 s) :
+2 452 boîtes englobantes, 757 `shape_failed` (murs composites Archicad), 409
+`degenerate` (menuiseries), 868 rattachements dont 749 déclarés par l'IFC.
 
 Les cinq JSON de findings préliminaires (`*_space_inventory.json`,
 `*_space_clash_findings.json`, `*_surface_loss.json`, `*_boundaries.json`,

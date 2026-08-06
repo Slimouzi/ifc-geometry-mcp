@@ -1,4 +1,4 @@
-"""Primitives IfcOpenShell partagées par les 5 analyseurs.
+"""Primitives IfcOpenShell partagées par les analyseurs.
 
 Ouverture de la maquette, hiérarchie spatiale (étage), rattachement aux zones
 (IfcZone), et géométrie : empreinte 2D (footprint) projetée sur le plan XY,
@@ -267,6 +267,103 @@ def bbox_width_height(element) -> tuple[float, float] | None:
     dz = float(verts[:, 2].max() - verts[:, 2].min())
     width = (dx**2 + dy**2) ** 0.5
     return width, dz
+
+
+@dataclass
+class ElementMeasures:
+    """Toutes les mesures d'un élément, pour **un seul** calcul de forme.
+
+    ``element_geometry``, ``element_centroid`` et ``bbox_width_height`` appellent
+    chacune ``create_shape``. Les enchaîner sur le même élément triple le coût du
+    balayage complet d'une maquette (mesuré : ~8 ms par élément et par appel).
+    Cette fonction fait le calcul une fois et distribue.
+    """
+
+    guid: str
+    status: str  # "ok" | "no_representation" | "shape_failed" | "degenerate"
+    footprint: Polygon | None = None
+    bbox: tuple[float, float, float, float, float, float] | None = None
+    centroid: tuple[float, float, float] | None = None
+    recalc_area_m2: float | None = None
+    opening_width_m: float | None = None
+    opening_height_m: float | None = None
+
+    @property
+    def z_min(self) -> float | None:
+        return self.bbox[4] if self.bbox else None
+
+    @property
+    def z_max(self) -> float | None:
+        return self.bbox[5] if self.bbox else None
+
+
+def element_measures(element) -> ElementMeasures:
+    """Empreinte, boîte englobante, centroïde et dimensions de menuiserie.
+
+    ``status`` distingue trois échecs que la valeur ``None`` seule confondrait,
+    et qui n'appellent pas la même conclusion :
+
+    - ``no_representation`` : aucune forme déclarée dans le fichier. Lacune de
+      maquette, à signaler au maître d'ouvrage.
+    - ``shape_failed`` : une forme est déclarée, mais aucun maillage n'en sort.
+      Mesuré sur la maquette de référence : 757 murs sur 1372 sont dans ce cas,
+      parce que leur matière vit dans leurs ``IfcBuildingElementPart``. C'est une
+      conséquence du périmètre demandé, pas un défaut de la maquette — les
+      confondre avec le cas précédent transformerait un choix de sélection en
+      alerte qualité.
+    - ``degenerate`` : maillage obtenu, boîte englobante disponible, mais aucune
+      facette ne se projette en surface. Toutes les portes de la maquette de
+      référence sont dans ce cas : une plaque verticale n'a pas d'empreinte, ses
+      dimensions restent mesurables.
+    """
+    guid = element.GlobalId
+    mesh = _mesh(element)
+    if mesh is None:
+        declared = getattr(element, "Representation", None) is not None
+        return ElementMeasures(
+            guid, "shape_failed" if declared else "no_representation"
+        )
+    verts, faces = mesh
+
+    bbox = (
+        float(verts[:, 0].min()),
+        float(verts[:, 0].max()),
+        float(verts[:, 1].min()),
+        float(verts[:, 1].max()),
+        float(verts[:, 2].min()),
+        float(verts[:, 2].max()),
+    )
+    centre = verts.mean(axis=0)
+    centroid = (float(centre[0]), float(centre[1]), float(centre[2]))
+    # Largeur d'une menuiserie : diagonale horizontale de l'emprise, car une
+    # porte n'est pas alignée sur les axes du projet. Voir bbox_width_height.
+    width = ((bbox[1] - bbox[0]) ** 2 + (bbox[3] - bbox[2]) ** 2) ** 0.5
+
+    tris = [
+        poly
+        for f in faces
+        if (poly := Polygon(verts[f][:, :2])).is_valid and poly.area > _MIN_FACE_AREA
+    ]
+    footprint: Polygon | None = None
+    recalc: float | None = None
+    if tris:
+        try:
+            merged = unary_union(tris).buffer(0)
+            if not merged.is_empty:
+                footprint, recalc = merged, float(merged.area)
+        except Exception:
+            logger.debug("union des facettes impossible pour %s", guid, exc_info=True)
+
+    return ElementMeasures(
+        guid=guid,
+        status="ok" if footprint is not None else "degenerate",
+        footprint=footprint,
+        bbox=bbox,
+        centroid=centroid,
+        recalc_area_m2=recalc,
+        opening_width_m=width,
+        opening_height_m=bbox[5] - bbox[4],
+    )
 
 
 def is_external(element) -> bool | None:

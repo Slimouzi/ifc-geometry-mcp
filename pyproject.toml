@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ifc-geometry-mcp"
-version = "0.5.1"
+version = "0.6.0"
 description = "Serveur MCP ifc-geometry d'audit géométrique IFC (moteur IfcOpenShell) — clash espaces, inventaire pièces/zones, pertes de surface, limites d'espaces et correspondance d'ouvertures. Produit les JSON consommés par audit-bim-i3f (import_preliminary_findings)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -46,11 +46,11 @@ dependencies = [
     # sandbox de chemins (``bim_core.paths``, ex-``bim-sandbox``). Non publié
     # sur PyPI — résolu via [tool.uv.sources] ; en CI/pip, préinstaller depuis
     # le tag Git.
-    "bim-core>=0.3.0,<0.4",
+    "bim-core>=0.4.0,<0.5",
 ]
 
 [tool.uv.sources]
-bim-core = { git = "https://github.com/Slimouzi/bim-core.git", tag = "bim-core-v0.3.0" }
+bim-core = { git = "https://github.com/Slimouzi/bim-core.git", tag = "bim-core-v0.4.0" }
 
 [project.optional-dependencies]
 dev = [
