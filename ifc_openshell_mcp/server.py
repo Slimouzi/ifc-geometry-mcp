@@ -54,10 +54,27 @@ def _load(ifc_path: str):
 
 
 def _write(stem: str, suffix: str, payload: dict, overwrite: bool) -> str:
+    """Écrit un contrat JSON, en refusant ``nan`` et ``inf``.
+
+    ``allow_nan=False`` n'est pas une précaution de style. Par défaut, ``json``
+    sérialise ``float("nan")`` en littéral ``NaN`` — que la norme JSON ne
+    connaît pas. Le fichier produit serait invalide, et surtout **silencieux** :
+    ``json.loads`` de Python le relit sans broncher, donc rien ne casserait ici,
+    tandis qu'un consommateur d'un autre langage échouerait à la lecture. Une
+    mesure non finie doit se voir à l'écriture, pas chez celui qui la consomme.
+
+    La garde vaut pour **tous** les contrats émis par ce serveur, pas seulement
+    ``spatial_evidence/v1`` : un ``nan`` est illégitime dans chacun.
+    """
     target = safe_output_path(f"{stem}{suffix}", overwrite=overwrite)
-    target.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    try:
+        texte = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
+    except ValueError as exc:  # `Out of range float values are not JSON compliant`
+        raise ValueError(
+            f"Refus d'écrire {target.name} : le payload contient une valeur non finie "
+            f"(nan ou inf), que JSON ne peut pas représenter. {exc}"
+        ) from exc
+    target.write_text(texte, encoding="utf-8")
     return str(target)
 
 
