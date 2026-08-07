@@ -1,4 +1,4 @@
-"""Serveur FastMCP ``ifc-geometry`` — 5 outils d'audit géométrique.
+"""Serveur FastMCP ``ifc-geometry`` — 9 outils d'audit géométrique.
 
 Chaque outil ouvre une maquette IFC, exécute son analyse et écrit un JSON sous
 ``AUDIT_OUTPUT_DIR`` (aligné sur celui d'``audit-bim-i3f`` pour que
@@ -24,9 +24,14 @@ from .analyzers import (
     inventory,
     openings,
     space_clash,
+    spatial_evidence,
     surface_loss,
 )
-from .contracts import validate_emitted_envelope, validate_emitted_quantities
+from .contracts import (
+    validate_emitted_envelope,
+    validate_emitted_quantities,
+    validate_emitted_spatial_evidence,
+)
 from .enrichers import base_quantities
 from .safe_paths import safe_input_path, safe_output_path
 
@@ -505,4 +510,75 @@ def export_computed_base_quantities(
         "schema": payload["schema"],
         "coverage": payload["coverage"],
         "n_quantities": len(payload["quantities"]),
+    }
+
+
+# --------------------------------------------------------------------------- #
+#  9. Preuves géométriques neutres (socle multi-AMO)
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+def extract_spatial_evidence(
+    ifc_path: str,
+    excluded_classes: list[str] | None = None,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Mesure boîtes englobantes, contenances et encombrements — **sans verdict**.
+
+    Écrit ``<stem>_spatial_evidence.json`` (schéma ``spatial_evidence/v1``).
+
+    Le document ne porte aucun seuil et ne mentionne aucun référentiel client :
+    c'est le socle sur lequel un profil AMO (I3F, BIM in Motion, Domofrance)
+    confronte *ses* exigences. Un seuil appartient au maître d'ouvrage qui
+    l'écrit, une mesure appartient à la maquette.
+
+    Deux mises en garde portées par le contrat lui-même :
+
+    - Il n'existe pas de champ « largeur ». Une pièce non convexe n'a pas de
+      largeur définie. Le document expose ``min_rect_width_m`` (petit côté du
+      rectangle englobant orienté) et ``inscribed_diameter_m`` (plus grand
+      cercle inscrit). Les deux coïncident et valent la largeur sur une pièce
+      convexe ; sur une pièce en L **aucune des deux** n'est la largeur du
+      passage le plus étroit. Un contrôle de largeur de circulation sur forme
+      quelconque demande un axe médian, absent de ce lot.
+    - Le rattachement d'un objet à un espace porte sa méthode
+      (``ifc_declared`` / ``centroid_in_footprint`` / ``footprint_overlap``).
+      Seule la première vient du fichier ; les deux autres sont déduites et un
+      consommateur exigeant peut les refuser.
+
+    Sélection par **exclusion** : tout ``IfcElement`` est mesuré sauf les classes
+    écartées, listées dans ``selection.excluded_classes`` du document. Les objets
+    sans géométrie exploitable restent présents avec un ``geometry_status``
+    explicite — les retirer ferait passer une lacune de maquette pour une absence
+    de problème.
+
+    Coût : le calcul de forme domine (~8 ms par élément). Sur une maquette de
+    10 500 produits, les exclusions par défaut ramènent le balayage à ~4 000
+    éléments.
+
+    Args:
+        ifc_path: Chemin de la maquette IFC (sandbox ``AUDIT_INPUT_DIR``).
+        excluded_classes: Classes IFC à écarter ; ``None`` → défaut du module
+            (ouvertures, couches de composants, éléments virtuels, annotations).
+        overwrite: Écrase le JSON existant.
+
+    Returns:
+        ``{json_path, schema, selection, coverage}``.
+    """
+    model, safe = _load(ifc_path)
+    payload = spatial_evidence.run(
+        model,
+        file_name=str(safe),
+        excluded_classes=(
+            tuple(excluded_classes)
+            if excluded_classes is not None
+            else spatial_evidence.DEFAULT_EXCLUDED_CLASSES
+        ),
+    )
+    validate_emitted_spatial_evidence(payload)  # conformité V1 garantie AVANT écriture
+    json_path = _write(safe.stem, "_spatial_evidence.json", payload, overwrite)
+    return {
+        "json_path": json_path,
+        "schema": payload["schema"],
+        "selection": payload["selection"],
+        "coverage": payload["coverage"],
     }
