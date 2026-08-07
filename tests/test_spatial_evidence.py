@@ -9,6 +9,9 @@ même source que le code ne prouve rien.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 from shapely.geometry import Polygon
 
@@ -200,3 +203,99 @@ def test_recouvrement_majoritaire_rattache_et_porte_son_ratio():
 def test_objet_sans_geometrie_du_tout_n_est_rattache_a_rien():
     spaces = [_space("RDC-SEJOUR", _SEJOUR)]
     assert _resolve_container(_FakeMeasures(), None, spaces, _FakeTree(1)) is None
+
+
+# --------------------------------------------------------------------------- #
+#  Aller-retour producteur → contrat, et refus des valeurs non finies
+# --------------------------------------------------------------------------- #
+def _fake_model(spaces):
+    """Modèle minimal : `run()` n'a besoin que de `by_type`."""
+
+    class _Model:
+        def by_type(self, _type):
+            return []
+
+    return _Model()
+
+
+def test_le_payload_produit_est_relu_par_le_contrat():
+    """**Aller-retour.** Ce que ce module écrit, `bim-core` doit le relire.
+
+    Le producteur appelait déjà `validate_emitted_spatial_evidence` avant
+    d'écrire, mais aucun test ne le vérifiait : la conformité tenait à une ligne
+    de production qu'une refonte pouvait retirer sans bruit. Ici, le payload est
+    construit puis repassé dans le contrat, et un champ mesuré est relu de
+    l'autre côté — sans quoi le test passerait sur un document vide.
+    """
+    from bim_core.contracts import parse_spatial_evidence
+
+    from ifc_openshell_mcp.analyzers import spatial_evidence as se
+
+    spaces = [
+        _space("SEJOUR", _SEJOUR),
+        _space("PIECE-L", Polygon([(0, 0), (6, 0), (6, 2), (2, 2), (2, 6), (0, 6)])),
+    ]
+    payload = se.run(_fake_model(spaces), file_name="probe.ifc", spaces=spaces)
+
+    relu = parse_spatial_evidence(payload, origin="probe")
+
+    # Non-vacuité : le document doit porter des mesures, pas seulement un schéma.
+    assert len(relu.spaces) == 2
+    par_id = {s.global_id: s for s in relu.spaces}
+    assert par_id["PIECE-L"].min_rect_width_m == pytest.approx(6.0, abs=0.01)
+    assert par_id["PIECE-L"].inscribed_diameter_m == pytest.approx(2.34, abs=0.05)
+    assert relu.source is not None and relu.source.producer == "ifc-geometry"
+
+
+def test_le_payload_produit_est_du_json_strict():
+    """Aucune valeur non finie : `nan` et `inf` ne sont pas du JSON.
+
+    `json.loads` de Python relit `NaN` sans broncher — un consommateur d'un
+    autre langage, non. La vérification doit donc être stricte ici, pas
+    permissive comme l'est le relecteur du même langage.
+    """
+    import json
+
+    from ifc_openshell_mcp.analyzers import spatial_evidence as se
+
+    spaces = [_space("SEJOUR", _SEJOUR)]
+    payload = se.run(_fake_model(spaces), file_name="probe.ifc", spaces=spaces)
+    json.dumps(payload, allow_nan=False)  # lève si un nan/inf s'est glissé
+
+
+def test_une_mesure_non_finie_est_refusee_a_l_ecriture(tmp_path, monkeypatch):
+    """Le garde-fou d'écriture, éprouvé — et sa non-vacuité.
+
+    Sans ce test, `allow_nan=False` pourrait être retiré de `_write` sans que
+    rien n'échoue : aucun payload réel ne porte de `nan` aujourd'hui.
+    """
+    from ifc_openshell_mcp import server
+
+    monkeypatch.setenv("AUDIT_OUTPUT_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="non finie"):
+        server._write("probe", "_x.json", {"schema": "x/v1", "v": float("nan")}, True)
+
+    # Contre-épreuve : un payload fini passe, sinon le refus ne prouverait rien.
+    chemin = server._write("probe", "_ok.json", {"schema": "x/v1", "v": 1.5}, True)
+    assert json.loads(Path(chemin).read_text(encoding="utf-8"))["v"] == 1.5
+
+
+def test_la_version_declaree_correspond_aux_metadonnees():
+    """`pyproject` et `__init__` doivent annoncer la même version.
+
+    Ce n'est pas une hygiène de forme dans ce dépôt : `__version__` alimente
+    `source.version` dans **chaque document produit**, et c'est ce champ qu'un
+    consommateur lit pour juger la provenance des mesures. Une dérive n'y ferait
+    pas échouer un import — elle mettrait une fausse version dans l'artefact,
+    et le consommateur en tirerait une conclusion fausse sans jamais le savoir.
+    """
+    import re
+
+    import ifc_openshell_mcp as pkg
+
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r'^version = "([^"]+)"', pyproject, re.M)
+    assert match, "prémisse : le pyproject doit déclarer une version"
+    assert pkg.__version__ == match.group(1)
