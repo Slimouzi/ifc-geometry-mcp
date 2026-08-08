@@ -381,7 +381,7 @@ def _menuiseries_of_walls(model, wall_types: dict[int, str]) -> dict:
     surf_fenetres = surf_portes = 0.0
     n = 0
     detail: list[dict] = []
-    par_type_openings: dict[str, float] = {}
+    par_type_openings: dict[str, dict[str, float]] = {}
     for rel in model.by_type("IfcRelVoidsElement"):
         host = rel.RelatingBuildingElement
         if host is None or host.id() not in wall_types:
@@ -393,14 +393,18 @@ def _menuiseries_of_walls(model, wall_types: dict[int, str]) -> dict:
         if not res:
             continue
         w, h, area = res
+        wall_type = wall_types[host.id()]
+        opening_type = "fenetres" if fill.is_a("IfcWindow") else "portes"
         if fill.is_a("IfcWindow"):
             surf_fenetres += area
         else:
             surf_portes += area
         n += 1
-        par_type_openings[wall_types[host.id()]] = (
-            par_type_openings.get(wall_types[host.id()], 0.0) + area
+        bucket = par_type_openings.setdefault(
+            wall_type, {"total": 0.0, "fenetres": 0.0, "portes": 0.0}
         )
+        bucket["total"] += area
+        bucket[opening_type] += area
         detail.append(
             {
                 "type": fill.is_a(),
@@ -780,12 +784,15 @@ def _run_geometric_type_filter(
     openings = men["par_type"]
     types_retenus = {r["type"] for r in fac["par_type"]}
     for row in fac["par_type"]:
-        row["menuiseries_m2"] = round(openings.get(row["type"], 0.0), 2)
+        opening = openings.get(row["type"], {})
+        row["menuiseries_m2"] = round(opening.get("total", 0.0), 2)
+        row["fenetres_m2"] = round(opening.get("fenetres", 0.0), 2)
+        row["portes_m2"] = round(opening.get("portes", 0.0), 2)
     # Part des menuiseries hébergée par un type ÉCARTÉ. Sans ce chiffre, un
     # lecteur verrait une ventilation par type intégralement nulle face à un
     # total non nul, et conclurait à un bug plutôt qu'à un choix de modélisation.
     men_hors_types_retenus = round(
-        sum(a for t, a in openings.items() if t not in types_retenus), 2
+        sum(o["total"] for t, o in openings.items() if t not in types_retenus), 2
     )
 
     return {
@@ -867,7 +874,10 @@ def _run_i3f(
     # Ventilation des menuiseries par type de mur porteur (colonne MOA F).
     openings = men["par_type"]
     for row in fac["par_type"]:
-        row["menuiseries_m2"] = round(openings.get(row["type"], 0.0), 2)
+        opening = openings.get(row["type"], {})
+        row["menuiseries_m2"] = round(opening.get("total", 0.0), 2)
+        row["fenetres_m2"] = round(opening.get("fenetres", 0.0), 2)
+        row["portes_m2"] = round(opening.get("portes", 0.0), 2)
 
     return {
         "schema": SCHEMA_ENVELOPE_QUANTITIES_V1,

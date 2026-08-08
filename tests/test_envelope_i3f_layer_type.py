@@ -85,6 +85,7 @@ def _model():
             f, ifc_class="IfcWallType", name=type_name
         )
         each = total_area / count
+        walls = []
         for _ in range(count):
             w = ifcopenshell.api.root.create_entity(f, ifc_class="IfcWall", name="Mur")
             # ArchiCAD renseigne PredefinedType pour TOUS les murs : si le
@@ -110,13 +111,39 @@ def _model():
                 ),
                 properties={"NetSideArea": float(each)},
             )
+            walls.append(w)
+        return walls
 
+    walls_by_type = {}
     for name, n, area in TYPES_METIER:
-        add_walls(name, n, area, LAYER_ENVELOPPE)
+        walls_by_type[name] = add_walls(name, n, area, LAYER_ENVELOPPE)
     for name, n, area in TYPES_HABILLAGE:
         add_walls(name, n, area, LAYER_ENVELOPPE)
     # Mur d'un AUTRE calque : hors périmètre, il ne doit apparaître nulle part.
     add_walls("CL 7 : sur ossature 70", 2, 500.0, LAYER_AUTRE)
+
+    def add_opening(host, ifc_class, name, width, height):
+        ouverture = ifcopenshell.api.root.create_entity(
+            f, ifc_class="IfcOpeningElement", name=f"Ouverture {name}"
+        )
+        f.create_entity(
+            "IfcRelVoidsElement",
+            GlobalId=ifcopenshell.guid.new(),
+            RelatingBuildingElement=host,
+            RelatedOpeningElement=ouverture,
+        )
+        fill = ifcopenshell.api.root.create_entity(f, ifc_class=ifc_class, name=name)
+        fill.OverallWidth, fill.OverallHeight = width, height
+        f.create_entity(
+            "IfcRelFillsElement",
+            GlobalId=ifcopenshell.guid.new(),
+            RelatingOpeningElement=ouverture,
+            RelatedBuildingElement=fill,
+        )
+
+    host = walls_by_type[TYPES_METIER[0][0]][0]
+    add_opening(host, "IfcWindow", "Fenetre 120x100", 1.2, 1.0)
+    add_opening(host, "IfcDoor", "Porte 90x210", 0.9, 2.1)
 
     # Pièces : seules celles rattachées à une zone comptent dans la SHAB.
     zone = ifcopenshell.api.root.create_entity(
@@ -223,6 +250,24 @@ def test_facade_total_matches_reference(payload):
     assert payload["summary"]["superficie_facades_m2"] == pytest.approx(
         TOTAL_FACADE, abs=0.05
     )
+
+
+def test_i3f_rows_carry_openings_split_by_wall_type(payload):
+    row = next(r for r in payload["par_type"] if r["type"] == TYPES_METIER[0][0])
+    assert row["menuiseries_m2"] == pytest.approx(3.09)
+    assert row["fenetres_m2"] == pytest.approx(1.2)
+    assert row["portes_m2"] == pytest.approx(1.89)
+    assert payload["summary"]["superficie_menuiseries_fenetres_m2"] == pytest.approx(
+        1.2
+    )
+    assert payload["summary"]["superficie_menuiseries_portes_m2"] == pytest.approx(1.89)
+
+
+def test_i3f_rows_without_openings_keep_explicit_zero_split(payload):
+    row = next(r for r in payload["par_type"] if r["type"] == TYPES_METIER[1][0])
+    assert row["menuiseries_m2"] == 0.0
+    assert row["fenetres_m2"] == 0.0
+    assert row["portes_m2"] == 0.0
 
 
 def test_shab_counts_only_zoned_non_annex_spaces(payload):
